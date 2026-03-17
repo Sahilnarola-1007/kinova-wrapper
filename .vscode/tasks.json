@@ -1,0 +1,39 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "type": "cppbuild",
+            "label": "Build wrapper",
+            "command": "/usr/bin/g++",
+            "args": [
+                "-fdiagnostics-color=always",
+                "-g",
+                "-std=c++17",
+                "-Wall",
+                "-Werror",
+
+                // add include directory
+                "-I${workspaceFolder}/include",
+
+                // compile and link all .cpp files you care about
+                // Keep in mind that which folder did you open as a workspace.
+                "${workspaceFolder}/src/KinovaInterface.cpp",
+                "${workspaceFolder}/test_part3_4.cpp",
+
+                "-o",
+                "${workspaceFolder}/wrapper_test"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "detail": "Build kinova wrapper."
+        }
+    ]
+}
