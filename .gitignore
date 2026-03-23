@@ -3,3 +3,6 @@ build/
 *.a
 wrapper_test
 .vscode/
+motion_test
+real_test
+state_test
