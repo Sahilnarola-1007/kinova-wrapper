@@ -28,7 +28,11 @@ bool KinovaInterface::connect(const std::string& ip_address,
                                 const std::string &password
         ){
                 std::lock_guard<std::mutex> lock(mutex_); 
-                
+                // step 1: validate inputs before touching SDK
+                if(ip_address.empty()){
+                    std::cerr << "Error: IP address is empty" << std::endl;
+                    return false;
+}
                 //step 1: To check the connection if its already connected or not
                 if(connected_.load()){
                     std::cout<<"Already connected, Closing a session and connection"<<std::endl;
@@ -49,16 +53,30 @@ bool KinovaInterface::connect(const std::string& ip_address,
                     return false;
                 }
                 
-                //step 3: creating router client
+                //step 3: creating router client with error callback
+#ifdef USE_KORTEX_MOCK
                 router_=std::make_unique<k_api::RouterClient>(transport_.get());
+#else
+                router_=std::make_unique<k_api::RouterClient>(transport_.get(),
+                [](k_api::KError err){ 
+                    std::cerr << "Router error: " << err.toString() << "\n"; 
+                    }
+            );
+#endif
                 
                 //step 4: Creating session_manager for managing session
                 session_manager_=std::make_unique<k_api::SessionManager>(router_.get());
                 
                 //step 5: Creating session info and pass it to the session manager
+#ifdef USE_KORTEX_MOCK
                 k_api::CreateSessionInfo session_info_;
                 session_info_.username=username;
                 session_info_.password=password;
+#else
+                k_api::Session::CreateSessionInfo session_info_;
+                session_info_.set_username(username);
+                session_info_.set_password(password);
+#endif
                 
                 //step 6: starting a session
                 try{
@@ -95,52 +113,55 @@ bool KinovaInterface::connect(const std::string& ip_address,
                     transport_.reset();
                     return false;
                 }
+
+    
+                // // step 8: Calling GetJointLimits method to get the joint limits
+                // try{
+
+                //     std::cout<<"fetching the joint limits..."<<std::endl;
+                //     auto joints_limits=base_client_->GetJointLimits();  // It has min and max limits of all the joints
+                    
+                //     joint_max_limits_.clear();
+                //     joint_min_limits_.clear();
+                //     joint_max_limits_.reserve(kNumJoints); // Pre allocation of the memory
+                //     joint_min_limits_.reserve(kNumJoints); 
+
+                //     for (const auto& limit:joints_limits)
+                //     {
+                //         joint_max_limits_.push_back(limit.max_value);
+                //         joint_min_limits_.push_back(limit.min_value);
+                //     }
+
+                //     std::cout<<"Fetched joint limits!"<<std::endl;
+                    
+                //     std::cout<<"maximum limit for all joints:= ";
+                //     for(const double &joint:joint_max_limits_){
+                //         std::cout<<joint<<" ";
+                //     }
+                //     std::cout<<"\n";
+
+                //     std::cout<<"minimum limit for all joints:= ";
+                //     for(const double &joint:joint_min_limits_){
+                //         std::cout<<joint<<" ";
+                //     }
+                //     std::cout<<"\n";
+                //     }
+                    
+                // catch(const std::exception &e){
+                //         std::cout<<"Did not get joints limits"<<std::endl;
+                //         std::cout<<e.what()<<std::endl;
+                    
+                //     base_client_.reset();
+                //     session_manager_->CloseSession();
+                //     session_manager_.reset();
+                //     router_.reset();
+                //     transport_->disconnect();
+                //     transport_.reset();
+                //     return false;
+
+                // }
                 
-                // step 8: Calling GetJointLimits method to get the joint limits
-                try{
-
-                    std::cout<<"fetching the joint limits..."<<std::endl;
-                    auto joints_limits=base_client_->GetJointLimits();  // It has min and max limits of all the joints
-                    
-                    joint_max_limits_.clear();
-                    joint_min_limits_.clear();
-                    joint_max_limits_.reserve(kNumJoints); // Pre allocation of the memory
-                    joint_min_limits_.reserve(kNumJoints); 
-
-                    for (const auto& limit:joints_limits)
-                    {
-                        joint_max_limits_.push_back(limit.max_value);
-                        joint_min_limits_.push_back(limit.min_value);
-                    }
-
-                    std::cout<<"Fetched joint limits!"<<std::endl;
-                    
-                    std::cout<<"maximum limit for all joints:= ";
-                    for(const double &joint:joint_max_limits_){
-                        std::cout<<joint<<" ";
-                    }
-                    std::cout<<"\n";
-
-                    std::cout<<"minimum limit for all joints:= ";
-                    for(const double &joint:joint_min_limits_){
-                        std::cout<<joint<<" ";
-                    }
-                    std::cout<<"\n";
-                    }
-                    
-                catch(const std::exception &e){
-                        std::cout<<"Did not get joints limits"<<std::endl;
-                        std::cout<<e.what()<<std::endl;
-                    
-                    base_client_.reset();
-                    session_manager_->CloseSession();
-                    session_manager_.reset();
-                    router_.reset();
-                    transport_->disconnect();
-                    transport_.reset();
-                    return false;
-
-                }
+                
                 connected_.store(true);
                 e_stop_active_.store(false);
                 std::cout << " Connected successfully and ready.\n";
@@ -258,8 +279,9 @@ bool KinovaInterface::moveToJointAngles(const std::vector<double> &angles){
 
         // Building kortex action: To send the commands to the joints
         k_api::Base::Action action;
-        action.is_joint_action=true;
 
+#ifdef USE_KORTEX_MOCK
+        action.is_joint_action=true;
         for(size_t i=0; i< angles.size();i++)
         {
             k_api::Base::JointAngle joint;
@@ -267,6 +289,15 @@ bool KinovaInterface::moveToJointAngles(const std::vector<double> &angles){
             joint.value=angles[i]*kRadToDeg;
             action.target_joint_angles.joint_angles.push_back(joint);
         }
+#else
+        for(size_t i=0; i< angles.size();i++)
+        {
+            auto *joint_angles=action.mutable_reach_joint_angles()->mutable_joint_angles();
+            auto *joint=joint_angles->add_joint_angles();
+            joint->set_joint_identifier(static_cast<uint32_t>(i));
+            joint->set_value(angles[i]*kRadToDeg);
+        }
+#endif
 
         //Calling kortex
         base_client_->ExecuteAction(action);
@@ -297,7 +328,7 @@ std::future<bool> KinovaInterface::moveToJointAnglesAsync(
 
 }
 
-//fun 4: moveToCartesianPose
+//fun 4: moveToCartesianPose — mutable_reach_pose()
 bool KinovaInterface::moveToCartesianPose(const Pose& pose){
     
     if(!connected_.load()){
@@ -312,15 +343,26 @@ bool KinovaInterface::moveToCartesianPose(const Pose& pose){
     std::lock_guard<std::mutex> lock(mutex_);
     try{
 
-        k_api::Base::Action action; 
+        k_api::Base::Action action;
+
+#ifdef USE_KORTEX_MOCK
         action.is_cartesian_action=true;
         action.target_pose.x=pose.x;
-        action.target_pose.y = pose.y;
-        action.target_pose.z = pose.z;
-        action.target_pose.theta_x = pose.theta_x;
-        action.target_pose.theta_y = pose.theta_y;
-        action.target_pose.theta_z = pose.theta_z;
- 
+        action.target_pose.y=pose.y;
+        action.target_pose.z=pose.z;
+        action.target_pose.theta_x=pose.theta_x;
+        action.target_pose.theta_y=pose.theta_y;
+        action.target_pose.theta_z=pose.theta_z;
+#else
+        auto* pose_msg = action.mutable_reach_pose()->mutable_target_pose();
+        pose_msg->set_x(pose.x);
+        pose_msg->set_y(pose.y);
+        pose_msg->set_z(pose.z);
+        pose_msg->set_theta_x(pose.theta_x);
+        pose_msg->set_theta_y(pose.theta_y);
+        pose_msg->set_theta_z(pose.theta_z);
+#endif
+        
         //Calling kortex
         base_client_->ExecuteAction(action);
  
@@ -412,15 +454,21 @@ std::vector<double> KinovaInterface::getJointAngles(){
     std::lock_guard<std::mutex> lock(mutex_);
 
     try{
-            auto joint_angles=base_client_->GetMeasuredJointAngles();
-            
+            auto joint_angles = base_client_->GetMeasuredJointAngles();
             std::vector<double> angles;
             angles.reserve(kNumJoints);
 
-            for(const auto& angle:joint_angles.joint_angles ){
-                
-                angles.push_back(angle.value*kDegToRad);
+            // getJointAngles — mock uses vector member, real SDK uses protobuf getter
+#ifdef USE_KORTEX_MOCK
+            for(const auto& angle : joint_angles.joint_angles){
+                angles.push_back(angle.value * kDegToRad);
             }
+#else
+            for (int i = 0; i < joint_angles.joint_angles_size(); i++) 
+            {
+                angles.push_back(joint_angles.joint_angles(i).value() * kDegToRad);
+            }
+#endif
             return angles; // Angles in radians
         
     }
@@ -446,13 +494,23 @@ Pose KinovaInterface::getCurrentPose(){
         
             auto kortex_pose=base_client_->GetMeasuredCartesianPose();
             Pose pose;
-        
+
+            // getCurrentPose — mock uses direct members, real SDK uses protobuf getters
+#ifdef USE_KORTEX_MOCK
             pose.x = kortex_pose.x;
             pose.y = kortex_pose.y;
             pose.z = kortex_pose.z;
             pose.theta_x = kortex_pose.theta_x;
             pose.theta_y = kortex_pose.theta_y;
             pose.theta_z = kortex_pose.theta_z;
+#else
+            pose.x = kortex_pose.x();
+            pose.y = kortex_pose.y();
+            pose.z = kortex_pose.z();
+            pose.theta_x = kortex_pose.theta_x();
+            pose.theta_y = kortex_pose.theta_y();
+            pose.theta_z = kortex_pose.theta_z();
+#endif
 
             return pose;
         }
@@ -467,28 +525,7 @@ Pose KinovaInterface::getCurrentPose(){
 // fun 3: Reading wrench:(fx,fy,fz,tx,ty,tz)
 std::vector<double> KinovaInterface::getWrench(){
     
-    if(!connected_.load()){
-        std::cerr<<"Not connected! Wrench reading failed"<<std::endl;
-        return {};
-    }
-
-    std::lock_guard<std::mutex> lock(mutex_);
-
-    try{
-            auto wrench=base_client_->GetMeasuredWrench();
-
-            return {wrench.force_x,wrench.force_y, wrench.force_z,
-            wrench.torque_x, wrench.torque_y, wrench.torque_z
-        };
-
-        }
-
-    catch(const std::exception &e){
-        std::cerr<<"Wrench reading failed: "<<
-        e.what()<<std::endl;
-        
-        return {};
-    }
+    return {};
 }
 
 // =============================================================================
