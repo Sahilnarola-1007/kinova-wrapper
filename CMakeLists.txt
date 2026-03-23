@@ -13,7 +13,9 @@ set(WRAPPER_SRC src/KinovaInterface.cpp)
 find_package(GTest REQUIRED)
 
 add_executable(test_connection tests/test_connection.cpp ${WRAPPER_SRC})
+target_compile_definitions(test_connection PRIVATE USE_KORTEX_MOCK)
 target_link_libraries(test_connection GTest::GTest GTest::Main pthread)
 
 add_executable(test_motion tests/test_motion.cpp ${WRAPPER_SRC})
+target_compile_definitions(test_motion PRIVATE USE_KORTEX_MOCK)
 target_link_libraries(test_motion GTest::GTest GTest::Main pthread)

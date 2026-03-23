@@ -299,6 +299,12 @@ bool KinovaInterface::moveToJointAngles(const std::vector<double> &angles){
         }
 #endif
 
+#ifndef USE_KORTEX_MOCK
+        auto servoingMode = k_api::Base::ServoingModeInformation();
+        servoingMode.set_servoing_mode(k_api::Base::ServoingMode::SINGLE_LEVEL_SERVOING);
+        base_client_->SetServoingMode(servoingMode);
+#endif
+        
         //Calling kortex
         base_client_->ExecuteAction(action);
         std::cout<<"joint motion completed"<<std::endl;
@@ -363,6 +369,12 @@ bool KinovaInterface::moveToCartesianPose(const Pose& pose){
         pose_msg->set_theta_z(pose.theta_z);
 #endif
         
+#ifndef USE_KORTEX_MOCK
+        auto servoingMode = k_api::Base::ServoingModeInformation();
+        servoingMode.set_servoing_mode(k_api::Base::ServoingMode::SINGLE_LEVEL_SERVOING);
+        base_client_->SetServoingMode(servoingMode);
+#endif
+      
         //Calling kortex
         base_client_->ExecuteAction(action);
  

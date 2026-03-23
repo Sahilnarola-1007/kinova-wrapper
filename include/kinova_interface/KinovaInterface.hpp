@@ -24,12 +24,16 @@
 #include <future>       // future, async
 #include <cstdint>      // uint32_t
 
-// On lab machine, replace with real Kortex headers:
-//   #include <KortexApiClient.h>
-//   #include <BaseClientRpc.h>
-//   #include <SessionManager.h>
-#include "../../mock/kortex_mock.hpp"
-
+// Kortex SDK — use mock for local development, real SDK for hardware
+#ifdef USE_KORTEX_MOCK
+    #include "../../mock/kortex_mock.hpp"
+#else
+    #include <BaseClientRpc.h>
+    #include <RouterClient.h>
+    #include <TransportClientTcp.h>
+    #include <SessionManager.h>
+    namespace k_api = Kinova::Api;
+#endif
 #include "Pose.hpp"
 
 namespace kinova_wrapper {
@@ -162,8 +166,8 @@ private:
     // Joints 1,3,5,7: continuous rotation (±360°)
     // Joints 2,4,6: software limits to prevent self-collision
     // =========================================================================
-    std::vector<double> joint_min_limits_;
-    std::vector<double> joint_max_limits_;
+    std::vector<double> joint_max_limits_{360.0, 128.9, 360.0, 147.8, 360.0, 120.3, 360.0};
+    std::vector<double> joint_min_limits_{-360.0, -128.9, -360.0, -147.8, -360.0, -120.3, -360.0};
 
     // =========================================================================
     // Speed limit
