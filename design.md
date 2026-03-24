@@ -481,3 +481,18 @@ kinova.moveToJointAngles({0, 0.26, 0, -1.05, 0, -0.78, 0});  // radians
 ```
 
 This is RAII — resources released automatically, in the correct order, even if an exception occurs.
+
+## Known Issues
+
+### `bad_function_call` on activation (Kortex SDK)
+A single `bad_function_call` message prints to stderr immediately after 
+connecting to the real Gen3. This originates from a Kortex SDK internal 
+thread — not from wrapper or ROS2 code. Evidence:
+
+- Try-catch blocks in both `on_activate()` and `publishJointStates()` do not catch it
+- Appears exactly once (not from 100ms timer loop)
+- No ROS2 log prefix — raw stderr from SDK internals
+- No functional impact: joint data publishes, all transitions succeed
+
+Kortex SDK is closed-source (.so), so the root cause cannot be patched.
+No action required unless it causes actual failures.
