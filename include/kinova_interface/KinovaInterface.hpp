@@ -102,7 +102,7 @@ public:
     // Move end-effector to a Cartesian position + orientation.
     // Kortex handles inverse kinematics internally.
     // Returns false on failure (unreachable pose, not connected, e-stop active).
-    bool moveToCartesianPose(const Pose& pose);
+    bool moveToCartesianPose(const Pose&pose);
 
     // Async version of moveToCartesianPose.
     std::future<bool> moveToCartesianPoseAsync(const Pose& pose);
@@ -133,6 +133,9 @@ public:
     // Never throws — safety function must always attempt to stop.
     // All subsequent motion commands rejected until clearEmergencyStop().
     void emergencyStop();
+
+    // To check if E stop is active or not
+    bool isEStopActive() const;
 
     // Reset e-stop flag and allow commands again.
     // Returns false if ClearFaults fails (e-stop remains active).

@@ -1,0 +1,5 @@
+std_msgs/Header header
+geometry_msgs/Pose grasp_pose
+geometry_msgs/Vector3 approach
+float64 force_limit
+uint8 grasp_type

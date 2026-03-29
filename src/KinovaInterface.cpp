@@ -2,7 +2,10 @@
 #include<iostream>
 #include<stdexcept>
 
+
 namespace kinova_wrapper{
+
+    
 
     KinovaInterface::KinovaInterface(){
         std::cout<<"KinovaInterface created. Call connect method \
@@ -224,6 +227,12 @@ void KinovaInterface::disconnect()
 //fun 4: isConnected()     
 bool KinovaInterface::isConnected() const {
                 return connected_.load();
+    
+        }
+
+//fun 5: isEStopActive()     
+bool KinovaInterface::isEStopActive() const {
+                return e_stop_active_.load();
     
         }
 // =============================================================================
