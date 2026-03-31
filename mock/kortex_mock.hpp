@@ -85,6 +85,11 @@ private:
 // --- Base Client (main control interface) ---
 namespace Base {
 
+    // Gripper control modes
+    constexpr uint32_t GRIPPER_POSITION = 0;
+    constexpr uint32_t GRIPPER_SPEED = 1;
+    constexpr uint32_t GRIPPER_FORCE = 2;
+
     // Simulated joint angle measurement from robot
     struct JointAngle {
         uint32_t joint_identifier = 0;
@@ -119,6 +124,28 @@ namespace Base {
         CartesianPose target_pose;
         bool is_joint_action = false;
         bool is_cartesian_action = false;
+    };
+
+    // Gripper finger — single actuator data
+    struct Finger {
+        uint32_t finger_identifier = 0;
+        double value = 0.0;
+    };
+
+    // Gripper — contains list of fingers
+    struct Gripper {
+        std::vector<Finger> finger;
+    };
+
+    // Gripper command — what you send
+    struct GripperCommand {
+        uint32_t mode = 0;
+        Gripper gripper;
+    };
+
+    // Gripper request — what you ask for when reading
+    struct GripperRequest {
+        uint32_t mode = 0;
     };
 
     class BaseClient {
@@ -185,12 +212,41 @@ namespace Base {
             e_stop_ = false;
         }
 
+        // Gripper methods
+        void setSimulateObject(bool val) { simulate_object_ = val; }
+
+        void SendGripperCommand(const GripperCommand& cmd) {
+            if (!cmd.gripper.finger.empty()) {
+                stored_gripper_position_ = cmd.gripper.finger[0].value;
+            }
+        }
+
+        Gripper GetMeasuredGripperMovement(const GripperRequest& req) {
+            (void)req;
+            Gripper g;
+            Finger f;
+            f.finger_identifier = 1;
+
+            // Simulate object stall: gripper can't fully close
+            if (simulate_object_ && stored_gripper_position_ > 0.5) {
+                f.value = 0.4;  // stalled at 0.4 instead of reaching 1.0
+            } else {
+                f.value = stored_gripper_position_;  // instant arrival
+            }
+
+            g.finger.push_back(f);
+            return g;
+        }
+
     private:
         RouterClient* router_;  // non-owning
         bool e_stop_ = false;
         JointAngles current_joint_angles_;
         CartesianPose current_pose_;
         Wrench current_wrench_;
+        double stored_gripper_position_ = 0.0; // tracks position 
+        bool simulate_object_ = false;
+
     };
 
 }  // namespace Base

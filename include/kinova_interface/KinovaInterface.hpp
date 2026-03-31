@@ -145,6 +145,18 @@ public:
     // Returns false if out of range or not connected.
     bool setSpeedLimit(double fraction);
 
+    // Gripper related functions
+    bool openGripper(double speed=0.1);
+    bool closeGripper(double force=40.0, double speed=0.1);
+    bool setGripperPosition(double position, double speed=0.1);
+    double getGripperPosition();
+    bool isObjectDetected();
+
+    #ifdef USE_KORTEX_MOCK
+        k_api::Base::BaseClient* getBaseClientForTesting() { 
+            return base_client_.get(); //Returns raw pointer- For testing mock 
+        }
+    #endif
 private:
     // =========================================================================
     // Kortex API objects — owned via unique_ptr (RAII)
@@ -195,6 +207,15 @@ private:
 
     // assumes mutex_ already held
     void disconnectLocked();
+
+    // Last commanded gripper position (for object detection comparison)
+    double last_commanded_grip_pos_{0.0};
+
+    // Gripper constants
+    static constexpr double kGripperTimeoutSec = 5.0;
+    static constexpr double kGripperPositionTolerance = 0.01;
+    static constexpr double kMaxGripperForceN = 235.0;
+
 };
 
 }  // namespace kinova_wrapper

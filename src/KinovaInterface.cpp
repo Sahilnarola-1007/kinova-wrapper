@@ -1,6 +1,13 @@
 #include"kinova_interface/KinovaInterface.hpp"
 #include<iostream>
 #include<stdexcept>
+#include<chrono>
+#include<vector>
+#include<cmath>
+#include<memory>
+#include<thread>
+
+
 
 
 namespace kinova_wrapper{
@@ -211,8 +218,6 @@ void KinovaInterface::disconnectLocked() {
             
             transport_.reset();
             
-            joint_max_limits_.clear();
-            joint_min_limits_.clear();
 
             connected_.store(false);
             }
@@ -577,6 +582,220 @@ bool KinovaInterface::setSpeedLimit(double fraction){
         return true;
 }
 
+// =============================================================================
+// Part 5: Gripper Control
+// =============================================================================
+
+bool KinovaInterface::setGripperPosition(double req_position,double speed){
+    
+    //TO DO: for now, this param is ignored but later it will be used in velocity control
+    (void)speed;
+
+    last_commanded_grip_pos_=req_position;
+
+    // Checking atomic flags
+    if(!connected_.load()){
+        std::cerr<<"Error! Not connected"<<std::endl;
+        return false;
+    }
+
+    if(e_stop_active_.load()){
+        std::cerr<<"Error! e-stop is active we can't proceed this action"
+        <<std::endl;
+        return false;
+    }
+
+    //Range validation
+    if(req_position < 0.0 || req_position > 1.0){
+    std::cerr << "Error! Position must be [0.0, 1.0], got " << req_position << std::endl;
+    return false;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    //Gripper command object
+    k_api::Base::GripperCommand gripper_command_;
+
+    //A Feedback object
+    k_api::Base::Gripper gripper_feedback_;
+    
+    //Defines: In which form user wants feedback: POSITION, SPEED, FORCE
+    k_api::Base::GripperRequest gripper_request_;
+
+#ifdef USE_KORTEX_MOCK
+    gripper_command_.mode = k_api::Base::GRIPPER_POSITION; //position as a control param
+    gripper_request_.mode = k_api::Base::GRIPPER_POSITION; //position in feedback request
+    k_api::Base::Finger finger;
+    finger.finger_identifier = 1;
+    finger.value = req_position;
+    gripper_command_.gripper.finger.push_back(finger);
+#else
+    gripper_command_.set_mode(k_api::Base::GRIPPER_POSITION);
+    gripper_request_.set_mode(k_api::Base::GRIPPER_POSITION);
+    auto finger = gripper_command_.mutable_gripper()->add_finger();
+    finger->set_finger_identifier(1);
+    finger->set_value(req_position);
+#endif
+
+    //Noting initial time
+    auto start = std::chrono::steady_clock::now();
+    
+    double current_position=0.0;
+    
+    try{
+        gripper_feedback_ = base_client_->GetMeasuredGripperMovement(gripper_request_);
+        
+#ifdef USE_KORTEX_MOCK
+    if(!gripper_feedback_.finger.empty()){
+        current_position = gripper_feedback_.finger[0].value;
+        std::cout<<"Initial gripper position: "<<current_position<<std::endl;
+    }
+#else
+    if(gripper_feedback_.finger_size()){
+        current_position = gripper_feedback_.finger(0).value();
+        std::cout<<"Initial gripper position: "<<current_position<<std::endl;
+    }
+#endif
+    
+        // Sending commands to the base
+        base_client_->SendGripperCommand(gripper_command_);
+    
+        }
+    
+        catch(const std::exception& e){
+        std::cerr<<"Gripper command failed!"<<e.what()<<std::endl;
+        return false;
+        }
+    
+    while (true)
+    {
+        //To check the duration
+        auto end = std::chrono::steady_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+
+        try{
+            gripper_feedback_ = base_client_->GetMeasuredGripperMovement(gripper_request_);
+            }
+
+        catch(const std::exception &e){
+            std::cerr<<"Gripper command failed!"<<e.what()<<std::endl;
+            return false;
+            }
+            
+#ifdef USE_KORTEX_MOCK
+    if(gripper_feedback_.finger.empty()){
+        std::cerr << "Empty gripper feedback, retrying..." << std::endl;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        continue;
+    }
+    current_position = gripper_feedback_.finger[0].value;
+
+#else
+    if(gripper_feedback_.finger_size()==0){
+        std::cerr << "Empty gripper feedback, retrying..." << std::endl;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        continue;
+    }
+    current_position = gripper_feedback_.finger(0).value();
+#endif
+
+std::cout<<"Current gripper position: "<<current_position<<std::endl;
+           
+        if(kGripperPositionTolerance > std::abs(current_position-req_position))
+        {
+                std::cout<<"Gripper reached target position: "<<std::endl;
+                std::cout<<"final position: "<<current_position<<
+                std::endl;
+                return true;
+        }
+        
+        if(duration.count()>kGripperTimeoutSec*1000)
+        {
+            std::cout<<"Timed out"<<std::endl;
+            return false;
+        }
+        
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
 }
+
+bool KinovaInterface::openGripper(double speed){
+    std::cout<<"Opening gripper..."<<std::endl;
+    return setGripperPosition(0.0,speed);
+    
+    }
+
+bool KinovaInterface::closeGripper(double force, double speed){
+
+    //TODO-use the force param. For now, void should be fine
+    (void)force;
+    std::cout<<"Closing Gripper..."<<std::endl;
+    return setGripperPosition(1.0,speed);
+}
+
+double KinovaInterface::getGripperPosition(){
+    
+    double current_position=-1.0;
+    
+    if(!connected_.load()){
+        std::cerr<<"Error! Not connected "<<std::endl;
+        return current_position;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    k_api::Base::Gripper gripper_feedback_;
+    k_api::Base::GripperRequest gripper_request_;
+
+#ifdef USE_KORTEX_MOCK
+    gripper_request_.mode = k_api::Base::GRIPPER_POSITION;
+#else
+    gripper_request_.set_mode(k_api::Base::GRIPPER_POSITION);
+#endif
+    
+    try{
+        
+        gripper_feedback_ = base_client_->GetMeasuredGripperMovement(gripper_request_);
+        
+    #ifdef USE_KORTEX_MOCK
+        if(!gripper_feedback_.finger.empty()){
+        current_position = gripper_feedback_.finger[0].value;
+    }
+    #else
+        if(gripper_feedback_.finger_size()){
+        current_position = gripper_feedback_.finger(0).value();
+        }
+    #endif
+
+        return current_position;
+    }
+    
+    catch(const std::exception& e){
+        std::cerr<<"Gripper command failed!"<<e.what()<<std::endl;
+        return current_position;
+        }
+}
+
+bool KinovaInterface::isObjectDetected(){
+    double gripper_position=getGripperPosition();
+    
+    if(gripper_position<0.0){
+        std::cerr<<"Unexpected gripper position"<<gripper_position<<std::endl;
+        return false;
+    }
+    
+    //The commanded position is higher than actual when the gripper stalled early on something.
+    if((last_commanded_grip_pos_ - gripper_position)>kGripperPositionTolerance
+            && last_commanded_grip_pos_>0.5)
+            {
+                std::cout<<"Object has detected"<<std::endl;
+                return true;
+            }
+    return false;
+}
+
+}
+
 
 

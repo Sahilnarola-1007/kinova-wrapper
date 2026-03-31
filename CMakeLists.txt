@@ -19,3 +19,7 @@ target_link_libraries(test_connection GTest::GTest GTest::Main pthread)
 add_executable(test_motion tests/test_motion.cpp ${WRAPPER_SRC})
 target_compile_definitions(test_motion PRIVATE USE_KORTEX_MOCK)
 target_link_libraries(test_motion GTest::GTest GTest::Main pthread)
+
+add_executable(test_gripper tests/gripper_test.cpp ${WRAPPER_SRC})
+target_compile_definitions(test_gripper PRIVATE USE_KORTEX_MOCK)
+target_link_libraries(test_gripper GTest::GTest GTest::Main pthread)
