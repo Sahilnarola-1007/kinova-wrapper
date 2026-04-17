@@ -54,13 +54,27 @@ int main() {
     // =========================================================================
     // State reading after motion (verify state updates)
     // =========================================================================
-    std::cout << "=== Test 7: Joint angles after motion ===\n";
-    kinova.moveToJointAngles({0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7});
-    angles = kinova.getJointAngles();
-    assert(angles.size() == 7);
-    // On real hardware, exact match not guaranteed without blocking motion
-    std::cout << "PASS: Got 7 joint angles after motion.\n\n";
-    
+    std::cout << "=== Test 7: Joint angles update after motion ===\n";
+    kinova.setSpeedLimit(0.1);
+
+    // Read current position
+    auto before = kinova.getJointAngles();
+
+    // Move joint 1 by ~10 degrees
+    std::vector<double> target = before;
+    target[0] += 0.174;  // 10 degrees in radians
+    kinova.moveToJointAngles(target);
+
+    // Read after motion
+    auto after = kinova.getJointAngles();
+    assert(after.size() == 7);
+
+    // Verify joint 1 actually moved (within 1 degree tolerance)
+    double kRadToDeg=180.0 / 3.14159265358979323846;
+    double delta = std::abs(after[0] - before[0]) * kRadToDeg;
+    assert(delta > 5.0);  // moved at least 5 degrees
+    std::cout << "PASS: Joint 1 moved " << delta << " degrees.\n\n";
+
     // =========================================================================
     // Speed limit
     // =========================================================================

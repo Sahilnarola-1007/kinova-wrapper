@@ -86,6 +86,8 @@ bool KinovaInterface::connect(const std::string& ip_address,
                 k_api::Session::CreateSessionInfo session_info_;
                 session_info_.set_username(username);
                 session_info_.set_password(password);
+                session_info_.set_session_inactivity_timeout(60000);    // default session timeout is very short. Session closes immmediately if no commands get sent from client to base
+                session_info_.set_connection_inactivity_timeout(2000);  // 
 #endif
                 
                 //step 6: starting a session
@@ -283,7 +285,7 @@ bool KinovaInterface::moveToJointAngles(const std::vector<double> &angles){
     }
 
     // thread-safe lock to protect shared state(joint_min_limits_ and joint_max_limit_ in the validate joint function)
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
 
     //Validating joint angles
     if (!validateJointAngles(angles)){
@@ -293,7 +295,7 @@ bool KinovaInterface::moveToJointAngles(const std::vector<double> &angles){
 
         // Building kortex action: To send the commands to the joints
         k_api::Base::Action action;
-
+        
 #ifdef USE_KORTEX_MOCK
         action.is_joint_action=true;
         for(size_t i=0; i< angles.size();i++)
@@ -304,6 +306,9 @@ bool KinovaInterface::moveToJointAngles(const std::vector<double> &angles){
             action.target_joint_angles.joint_angles.push_back(joint);
         }
 #else
+        action.set_name("moveToJointAngles");       
+        action.set_application_data("");            
+
         for(size_t i=0; i< angles.size();i++)
         {
             auto *joint_angles=action.mutable_reach_joint_angles()->mutable_joint_angles();
@@ -317,13 +322,48 @@ bool KinovaInterface::moveToJointAngles(const std::vector<double> &angles){
         auto servoingMode = k_api::Base::ServoingModeInformation();
         servoingMode.set_servoing_mode(k_api::Base::ServoingMode::SINGLE_LEVEL_SERVOING);
         base_client_->SetServoingMode(servoingMode);
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        
 #endif
         
         //Calling kortex
-        base_client_->ExecuteAction(action);
-        std::cout<<"joint motion completed"<<std::endl;
+        
+#ifdef USE_KORTEX_MOCK
+        base_client_->ExecuteAction(action);  // In the mock, it is Non-Blocking
+        std::cout << "joint motion completed\n";
+        return true;
+#else
+        std::promise<k_api::Base::ActionEvent> finished;
+        auto future_event = finished.get_future();
 
-        return true;    
+        lock.unlock();
+        auto handle = base_client_->OnNotificationActionTopic(
+            [&finished](k_api::Base::ActionNotification notification) {
+                const auto event = notification.action_event();
+                if (event == k_api::Base::ACTION_END ||
+                    event == k_api::Base::ACTION_ABORT) {
+                    finished.set_value(event);
+                }
+            },
+            k_api::Common::NotificationOptions()
+        );
+
+        base_client_->ExecuteAction(action);
+
+        auto status = future_event.wait_for(std::chrono::seconds(30));
+        base_client_->Unsubscribe(handle);
+
+        if (status == std::future_status::timeout) {
+            std::cerr << "Motion timed out\n";
+            return false;
+        }
+        if (future_event.get() == k_api::Base::ACTION_ABORT) {
+            std::cerr << "Motion aborted by robot\n";
+            return false;
+        }
+        std::cout << "joint motion completed\n";
+        return true;
+#endif    
         }
         
         catch(const std::exception &e){
@@ -360,7 +400,7 @@ bool KinovaInterface::moveToCartesianPose(const Pose& pose){
         <<std::endl;
         return false;
     }
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
     try{
 
         k_api::Base::Action action;
@@ -374,6 +414,9 @@ bool KinovaInterface::moveToCartesianPose(const Pose& pose){
         action.target_pose.theta_y=pose.theta_y;
         action.target_pose.theta_z=pose.theta_z;
 #else
+        action.set_name("moveToJointAngles");       
+        action.set_application_data("");            
+
         auto* pose_msg = action.mutable_reach_pose()->mutable_target_pose();
         pose_msg->set_x(pose.x);
         pose_msg->set_y(pose.y);
@@ -387,13 +430,46 @@ bool KinovaInterface::moveToCartesianPose(const Pose& pose){
         auto servoingMode = k_api::Base::ServoingModeInformation();
         servoingMode.set_servoing_mode(k_api::Base::ServoingMode::SINGLE_LEVEL_SERVOING);
         base_client_->SetServoingMode(servoingMode);
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
 #endif
       
         //Calling kortex
+#ifdef USE_KORTEX_MOCK
         base_client_->ExecuteAction(action);
- 
         std::cout << "Cartesian motion completed.\n";
         return true;
+#else
+        std::promise<k_api::Base::ActionEvent> finished;
+        auto future_event = finished.get_future();
+
+        lock.unlock();
+        auto handle = base_client_->OnNotificationActionTopic(
+            [&finished](k_api::Base::ActionNotification notification) {
+                const auto event = notification.action_event();
+                if (event == k_api::Base::ACTION_END ||
+                    event == k_api::Base::ACTION_ABORT) {
+                    finished.set_value(event);
+                }
+            },
+            k_api::Common::NotificationOptions()
+        );
+
+        base_client_->ExecuteAction(action);
+
+        auto status = future_event.wait_for(std::chrono::seconds(30));
+        base_client_->Unsubscribe(handle);
+
+        if (status == std::future_status::timeout) {
+            std::cerr << "Cartesian motion timed out\n";
+            return false;
+        }
+        if (future_event.get() == k_api::Base::ACTION_ABORT) {
+            std::cerr << "Cartesian motion aborted by robot\n";
+            return false;
+        }
+        std::cout << "Cartesian motion completed.\n";
+        return true;
+#endif
         } 
         
     catch (const std::exception& e) 
@@ -633,7 +709,7 @@ bool KinovaInterface::setGripperPosition(double req_position,double speed){
     gripper_command_.set_mode(k_api::Base::GRIPPER_POSITION);
     gripper_request_.set_mode(k_api::Base::GRIPPER_POSITION);
     auto finger = gripper_command_.mutable_gripper()->add_finger();
-    finger->set_finger_identifier(1);
+    finger->set_finger_identifier(1);  //actuator ID
     finger->set_value(req_position);
 #endif
 
@@ -730,8 +806,11 @@ bool KinovaInterface::closeGripper(double force, double speed){
 
     //TODO-use the force param. For now, void should be fine
     (void)force;
-    std::cout<<"Closing Gripper..."<<std::endl;
-    return setGripperPosition(1.0,speed);
+
+    std::cout << "Closing Gripper..." << std::endl;
+    bool reached = setGripperPosition(1.0, speed);
+    if (reached) return true;
+    return isObjectDetected();
 }
 
 double KinovaInterface::getGripperPosition(){
@@ -793,6 +872,141 @@ bool KinovaInterface::isObjectDetected(){
                 return true;
             }
     return false;
+}
+
+bool KinovaInterface::validateTrajectory(const std::vector<TrajectoryPoint> & waypoints) const{
+    
+    if(waypoints.empty()){  
+         std::cerr<<"Invalid trajectory! Waypoints are empty"<<std::endl;
+         return false;
+        }
+    
+    if(waypoints[0].time_from_start<=0.0){
+        std::cerr<<"start time is Invalid a"<<std::endl;
+        return false;
+            }
+      
+    for(size_t i=0; i<waypoints.size();i++)
+        {
+            if(i > 0 && waypoints[i].time_from_start <= waypoints[i-1].time_from_start)
+                {std::cerr << "Non-monotonic time: waypoint " << i 
+                    << " time (" << waypoints[i].time_from_start 
+                    << ") <= waypoint " << i-1 
+                    << " time (" << waypoints[i-1].time_from_start << ")" << std::endl;
+                return false;
+                }
+
+            if(!validateJointAngles(waypoints[i].joint_angles)){
+                return false;
+            }
+        }
+    std::cout<<"trajectory validation successfully"<<std::endl;
+    return true;
+
+
+}
+ 
+bool KinovaInterface::executeTrajectory(const std::vector<TrajectoryPoint> & waypoints,
+                        MotionCallback feedback_callback){
+    
+    if(!connected_.load()){
+        std::cerr<<"Error! Not connected"<<std::endl;
+        return false;
+    }
+    if(e_stop_active_.load()){
+        std::cerr<<"Error! e-stop is active we can't proceed this action"
+        <<std::endl;
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    //Validating trajectory
+    if (!validateTrajectory(waypoints)){
+        return false;
+    }
+    
+    try{ 
+
+        //Setting servoing mode 
+        #ifndef USE_KORTEX_MOCK
+                    auto servoingMode = k_api::Base::ServoingModeInformation();
+                    servoingMode.set_servoing_mode(k_api::Base::ServoingMode::SINGLE_LEVEL_SERVOING);
+                    base_client_->SetServoingMode(servoingMode);
+        #endif
+
+        for(size_t j=0; j< waypoints.size();j++){
+            k_api::Base::Action action;
+
+            #ifdef USE_KORTEX_MOCK
+                    action.is_joint_action=true;
+                    for(size_t i=0; i< waypoints[j].joint_angles.size();i++)
+                    {
+                        k_api::Base::JointAngle joint;
+                        joint.joint_identifier=static_cast<uint32_t>(i);
+                        joint.value=waypoints[j].joint_angles[i]*kRadToDeg;
+                        action.target_joint_angles.joint_angles.push_back(joint);
+                    }
+            #else
+                    for(size_t i=0;i< waypoints[j].joint_angles.size();i++)
+                    {
+                        auto *joint_angles=action.mutable_reach_joint_angles()->mutable_joint_angles();
+                        auto *joint=joint_angles->add_joint_angles();
+                        joint->set_joint_identifier(static_cast<uint32_t>(i));
+                        joint->set_value(waypoints[j].joint_angles[i]*kRadToDeg);
+                    }
+            #endif
+                    base_client_->ExecuteAction(action);
+                    
+                    //To tack the waypoints
+                    double delta = (j == 0) ? waypoints[0].time_from_start 
+                        : waypoints[j].time_from_start - waypoints[j-1].time_from_start;
+                    std::this_thread::sleep_for(std::chrono::duration<double>(delta));
+
+                    if(feedback_callback) {  // check if caller provided a callback (could be nullptr)
+    
+                        // Read current joints — directly from base_client_, NOT getJointAngles()
+                        auto measured = base_client_->GetMeasuredJointAngles();
+                        
+                        // Convert to radians vector (same logic as your getJointAngles())
+                        std::vector<double> current_joints;
+                        current_joints.reserve(kNumJoints);
+                    #ifdef USE_KORTEX_MOCK
+                        for(const auto& angle : measured.joint_angles) {
+                            current_joints.push_back(angle.value * kDegToRad);
+                        }
+                    #else
+                        for(int i = 0; i < measured.joint_angles_size(); i++) {
+                            current_joints.push_back(measured.joint_angles(i).value() * kDegToRad);
+                        }
+                    #endif
+                        
+                        // Compute progress and fire
+                        double progress = static_cast<double>(j + 1) / static_cast<double>(waypoints.size());
+                        feedback_callback(current_joints, progress);
+                    }    
+                }
+
+                    std::cout<<"joint motion completed"<<std::endl;
+                    return true;
+            }
+        
+        catch(const std::exception &e){
+            std::cerr<<"Trajectory execution failed"<<
+            e.what()<<std::endl;
+            
+            return false;
+        }
+    }
+std::future<bool> KinovaInterface::executeTrajectoryAsync(
+                            const std::vector<TrajectoryPoint> &waypoints,
+                            MotionCallback feedback_callback){
+
+    // Capture by value to ensure safety across async boundary
+    return std::async(std::launch::async,[this,waypoints,feedback_callback](){
+        return this->executeTrajectory(waypoints,feedback_callback);
+    });
+
 }
 
 }

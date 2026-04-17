@@ -38,6 +38,15 @@
 
 namespace kinova_wrapper {
 
+    struct TrajectoryPoint {
+    std::vector<double> joint_angles;  // radians
+    double time_from_start;            // seconds from trajectory start
+    };
+
+    using MotionCallback=std::function<void(
+        const std::vector<double>& current_joints,
+        double progress)>;
+
 class KinovaInterface {
 public:
     // =========================================================================
@@ -157,6 +166,13 @@ public:
             return base_client_.get(); //Returns raw pointer- For testing mock 
         }
     #endif
+
+    //Trajectory related methods
+    bool executeTrajectory(const std::vector<TrajectoryPoint>& waypoints,
+                            MotionCallback feedback_callback=nullptr);
+       
+    std::future<bool> executeTrajectoryAsync(const std::vector<TrajectoryPoint>& waypoints,
+                            MotionCallback feedback_callback=nullptr);
 private:
     // =========================================================================
     // Kortex API objects — owned via unique_ptr (RAII)
@@ -178,12 +194,11 @@ private:
     // =========================================================================
     // Joint limits — queried from robot during connect()
     // Stored in DEGREES (Kortex convention). Conversion happens in public methods.
-    // Joints 1,3,5,7: continuous rotation (±360°)
-    // Joints 2,4,6: software limits to prevent self-collision
+    // Joints 1,3,5,7: No limts
+    // Joints 2,4,6: actual firmware limits
     // =========================================================================
-    std::vector<double> joint_max_limits_{360.0, 128.9, 360.0, 147.8, 360.0, 120.3, 360.0};
-    std::vector<double> joint_min_limits_{-360.0, -128.9, -360.0, -147.8, -360.0, -120.3, -360.0};
-
+    std::vector<double> joint_max_limits_{ 1e9, 128.9, 1e9, 1e9, 1e9, 120.3, 1e9};
+    std::vector<double> joint_min_limits_{-1e9,-128.9,-1e9,-1e9,-1e9,-120.3,-1e9};
     // =========================================================================
     // Speed limit
     // =========================================================================
@@ -216,6 +231,8 @@ private:
     static constexpr double kGripperPositionTolerance = 0.01;
     static constexpr double kMaxGripperForceN = 235.0;
 
+    //Trajectory helper
+    bool validateTrajectory(const std::vector<TrajectoryPoint> & waypoints) const;
 };
 
 }  // namespace kinova_wrapper

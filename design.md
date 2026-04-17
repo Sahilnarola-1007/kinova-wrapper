@@ -295,6 +295,25 @@ Why (commanded - actual)?
   Commanded 1.0, actual 0.4 → gap 0.6 → object detected.
 ```
 
+### TrajectoryPoint struct
+joint_angles: vector of 7 doubles (radians)
+time_from_start: seconds from trajectory start
+
+### executeTrajectory()
+Signature: bool executeTrajectory(const vector<TrajectoryPoint>& waypoints, MotionCallback feedback_cb = nullptr)
+- Validates all waypoints (joint limits, monotonic timing)
+- Executes sequentially via Kortex ExecuteAction per waypoint
+- Fires optional feedback callback after each waypoint with current joints and progress
+- Thread-safe: holds mutex_ for entire execution
+
+### executeTrajectoryAsync()
+- std::async wrapper around executeTrajectory
+- Captures waypoints and callback by value
+
+### validateTrajectory() (private)
+- Empty check, first time > 0, monotonic times, joint limit validation
+- Called under mutex_, never locks itself
+
 ### emergencyStop()
 
 ```
@@ -346,6 +365,11 @@ struct Pose {
 | `GetMeasuredWrench` unavailable | Not in our SDK build | Return empty vector, implement when SDK updated |
 | `CreateSessionInfo` differs mock vs real | Real uses `Session::CreateSessionInfo` + `set_username()` | `#ifdef` guard for struct type and accessors |
 | `RouterClient` constructor differs | Real takes error callback lambda, mock doesn't | `#ifdef` guard for constructor call |
+KORTEX SESSION TIMEOUT (critical):
+Always set session_inactivity_timeout=60000 and 
+connection_inactivity_timeout=2000 in CreateSession.
+Without this, sessions die during wait_for() and 
+robot aborts motion silently.
 
 ---
 

@@ -59,67 +59,71 @@ Three lines replace sixty. Resources are managed automatically via RAII. Every c
 
 ## Architecture
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│                      User Code / ROS2                        │
-│  (Lifecycle nodes, action servers, pick-and-place logic)     │
-└──────────────────────────┬───────────────────────────────────┘
-                           │  clean, single-line calls
-                           ▼
-┌──────────────────────────────────────────────────────────────┐
-│                    KinovaInterface                           │
-│                                                              │
-│  ┌─────────────┐ ┌──────────────┐ ┌────────────────────┐    │
-│  │ Connection   │ │ Motion       │ │ Gripper            │    │
-│  │ Manager      │ │ Controller   │ │ Controller         │    │
-│  │              │ │              │ │                    │    │
-│  │ connect()    │ │ moveToJoint  │ │ openGripper()      │    │
-│  │ disconnect() │ │  Angles()   │ │ closeGripper()     │    │
-│  │ isConnected()│ │ moveToPose() │ │ setGripperPos()    │    │
-│  │              │ │ async vars   │ │ isObjectDetected() │    │
-│  └─────────────┘ └──────────────┘ └────────────────────┘    │
-│                                                              │
-│  ┌─────────────┐ ┌──────────────┐ ┌────────────────────┐    │
-│  │ State        │ │ Safety       │ │ Validation         │    │
-│  │ Reader       │ │ System       │ │                    │    │
-│  │              │ │              │ │ Joint limits       │    │
-│  │ getJoint     │ │ eStop()      │ │ Gripper range      │    │
-│  │  Angles()   │ │ clearEStop() │ │ Connection check   │    │
-│  │ getPose()    │ │ speedLimit() │ │ E-stop gate        │    │
-│  │ getWrench()  │ │ atomic flags │ │                    │    │
-│  └─────────────┘ └──────────────┘ └────────────────────┘    │
-│                                                              │
-│  Thread safety: std::mutex on all Kortex calls               │
-│  Resource mgmt: unique_ptr RAII on all SDK objects            │
-│  Error model:   bool returns + exceptions for unrecoverable  │
-└──────────────────────────┬───────────────────────────────────┘
-                           │  protobuf commands via TCP/IP
-                           ▼
-┌──────────────────────────────────────────────────────────────┐
-│                     Kortex SDK Layer                         │
-│  TransportClientTcp → RouterClient → SessionManager          │
-│  → BaseClient (motion, gripper, state, safety)               │
-└──────────────────────────┬───────────────────────────────────┘
-                           │
-                           ▼
-┌──────────────────────────────────────────────────────────────┐
-│              Kinova Gen3 7-DOF + Robotiq 2F-85               │
-│              (TCP/IP, default 192.168.1.10:10000)            │
-└──────────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    A["<b>User Code / ROS2</b><br/>Lifecycle nodes, action servers,<br/>pick-and-place logic"] 
+    -->|"single-line calls"| B
+
+    subgraph B["KinovaInterface Wrapper"]
+        direction TB
+        B1["<b>Connection</b><br/>connect() · disconnect()<br/>isConnected()"]
+        B2["<b>Motion</b><br/>moveToJointAngles()<br/>moveToCartesianPose()<br/>async variants"]
+        B3["<b>Gripper</b><br/>open/close/setPosition<br/>isObjectDetected()"]
+        B4["<b>State</b><br/>getJointAngles()<br/>getCurrentPose()<br/>getWrench()"]
+        B5["<b>Safety</b><br/>emergencyStop()<br/>clearEStop()<br/>setSpeedLimit()"]
+        B6["<b>Trajectory</b><br/>executeTrajectory()<br/>async + feedback callback"]
+    end
+
+    B -->|"protobuf over TCP/IP"| C["<b>Kortex SDK</b><br/>TransportClientTcp → RouterClient<br/>→ SessionManager → BaseClient"]
+    C -->|"TCP/IP"| D["<b>Kinova Gen3 7-DOF</b><br/>+ Robotiq 2F-85<br/>192.168.1.10:10000"]
+
+    style A fill:#4a90d9,color:#fff,stroke:#2c5f8a
+    style B fill:#f0f4f8,stroke:#2c5f8a,stroke-width:2px
+    style B1 fill:#fff,stroke:#4a90d9
+    style B2 fill:#fff,stroke:#4a90d9
+    style B3 fill:#fff,stroke:#4a90d9
+    style B4 fill:#fff,stroke:#4a90d9
+    style B5 fill:#fff,stroke:#4a90d9
+    style B6 fill:#fff,stroke:#4a90d9
+    style C fill:#6c757d,color:#fff,stroke:#495057
+    style D fill:#28a745,color:#fff,stroke:#1e7e34
 ```
 
 ## Key Design Decisions
 
-| Decision | Choice | Why |
-|----------|--------|-----|
-| Resource management | `unique_ptr` RAII, reverse destruction order | Zero leaks, exception-safe, no manual `delete` |
-| Thread safety | Single `std::mutex` on all Kortex calls | SDK is not thread-safe; one lock is simple and correct |
-| E-stop | `std::atomic<bool>` set before mutex lock | Instant visibility to all threads, even if mutex is held |
-| Sync + Async | `std::future<bool>` via `std::async` | Sync for simple use, async for non-blocking motion |
-| Units | Radians (public), degrees (internal) | Robotics convention externally, Kortex convention internally |
-| Gripper polling | 100ms loop with 5s timeout | `SendGripperCommand` is non-blocking; must poll completion |
-| Object detection | Commanded vs actual position gap | No dedicated sensor; Robotiq stall = position gap |
-| Testability | `#ifdef USE_KORTEX_MOCK` with mock SDK | Full test suite runs without hardware, CI/CD compatible |
+```mermaid
+graph LR
+    subgraph Resource["🔒 Resource Management"]
+        R1["unique_ptr RAII"] --> R2["Reverse destruction order<br/>base → session → router → transport"]
+    end
+
+    subgraph Thread["🧵 Thread Safety"]
+        T1["Single std::mutex"] --> T2["All Kortex calls protected"]
+        T3["std::atomic flags"] --> T4["E-stop visible instantly<br/>even if mutex is held"]
+    end
+
+    subgraph Motion["⚡ Motion Control"]
+        M1["Sync: bool return"] --> M2["Simple blocking calls"]
+        M3["Async: std::future"] --> M4["Non-blocking motion"]
+    end
+
+    subgraph Gripper["🤖 Gripper Control"]
+        G1["SendGripperCommand"] --> G2["Non-blocking → poll loop<br/>100ms interval, 5s timeout"]
+        G3["Object detection"] --> G4["Commanded vs actual gap<br/>Stall = object grasped"]
+    end
+
+    subgraph Testing["🧪 Testability"]
+        TE1["#ifdef USE_KORTEX_MOCK"] --> TE2["33 mock tests without hardware<br/>6 hardware test suites on real Gen3"]
+    end
+
+    style Resource fill:#e8f4fd,stroke:#2196F3,stroke-width:2px
+    style Thread fill:#fff3e0,stroke:#FF9800,stroke-width:2px
+    style Motion fill:#e8f5e9,stroke:#4CAF50,stroke-width:2px
+    style Gripper fill:#fce4ec,stroke:#E91E63,stroke-width:2px
+    style Testing fill:#f3e5f5,stroke:#9C27B0,stroke-width:2px
+```
+
+> **Units convention:** Radians in public API, degrees internally (Kortex convention). Conversion happens at the API boundary — callers never deal with degrees.
 
 ## Dependencies
 
@@ -132,16 +136,24 @@ Three lines replace sixty. Resources are managed automatically via RAII. Every c
 ```
 wrapper/
 ├── include/kinova_interface/
-│   ├── KinovaInterface.hpp       # Class declaration, public API
-│   └── Pose.hpp                  # Cartesian pose struct
+│   ├── KinovaInterface.hpp
+│   └── Pose.hpp
 ├── mock/
-│   └── kortex_mock.hpp           # Mock SDK (structs, stubs, stall simulation)
+│   └── kortex_mock.hpp
 ├── src/
-│   └── KinovaInterface.cpp       # Implementation (~800 lines)
+│   └── KinovaInterface.cpp
 ├── tests/
-│   ├── test_connection.cpp       # 4 tests: connect, disconnect, invalid IP, no-op
-│   ├── test_motion.cpp           # 7 tests: motion, state reading, safety
-│   └── gripper_test.cpp          # 14 tests: position, open/close, object detection
+│   ├── test_connection.cpp       # 4 tests (mock)
+│   ├── test_motion.cpp           # 7 tests (mock)
+│   ├── gripper_test.cpp          # 14 tests (mock)
+│   ├── TrajectoryTest.cpp        # 8 tests (mock)
+│   └── hardware/
+│       ├── test_hw_connection.cpp # Real robot connect/disconnect
+│       ├── test_hw_motion.cpp     # Joint motion on real arm
+│       ├── test_hw_state.cpp      # State reading validation
+│       ├── test_hw_gripper.cpp    # Robotiq open/close/detect
+│       ├── test_hw_estop.cpp      # E-stop mid-motion
+│       └── test_hw_fk_ik.cpp      # FK/IK vs Kortex validation
 └── CMakeLists.txt
 ```
 
@@ -155,20 +167,37 @@ make -j$(nproc)
 
 ## Run Tests
 
-```bash
+### Mock Tests (no hardware required)
 ./test_connection        # 4 tests
 ./test_motion            # 7 tests
 ./test_gripper           # 14 tests
+./test_trajectory        # 8 tests
 
-# Filter specific suite
-./test_gripper --gtest_filter="GripperTest.*"
-```
+### Hardware Tests (real Gen3 required)
+./hw_test_connection     # Connect/disconnect
+./hw_test_motion         # Small joint motions
+./hw_test_state          # Joint angle/pose reading
+./hw_test_gripper        # Robotiq 2F-85 open/close/object detection
+./hw_test_estop          # E-stop interrupts motion
+./hw_test_fk_ik          # FK/IK validated against Kortex API
 
-**25 tests passing (mock SDK).** Real hardware validation on scheduled lab visits.
+**33 mock tests passing. 6 hardware test suites validated on real Gen3.**
+
+
 
 ## API
 
 ```cpp
+
+// Types
+struct TrajectoryPoint {
+    std::vector<double> joint_angles;  // radians
+    double time_from_start;            // seconds
+};
+
+using MotionCallback = std::function<void(
+    const std::vector<double>& current_joints, double progress)>;
+    
 // Connection
 bool connect(const std::string& ip, uint32_t port = 10000);
 void disconnect();
@@ -197,7 +226,15 @@ void emergencyStop();
 bool isEStopActive() const;
 bool clearEmergencyStop();
 bool setSpeedLimit(double fraction);  // 0.0 to 1.0
+
+// Trajectory
+bool executeTrajectory(const std::vector<TrajectoryPoint>& waypoints,
+                       MotionCallback feedback_cb = nullptr);
+std::future<bool> executeTrajectoryAsync(const std::vector<TrajectoryPoint>& waypoints,
+                                          MotionCallback feedback_cb = nullptr);
 ```
+
+
 
 ## ROS2 Integration
 
@@ -218,16 +255,19 @@ The wrapper is consumed by `KinovaLifecycleController`, a ROS2 lifecycle node pr
 
 ## Roadmap
 
+## Roadmap
+
 - [x] Connection management (RAII, auto-cleanup, reconnection)
 - [x] Joint and Cartesian motion (sync + async)
 - [x] Emergency stop + joint limit validation
 - [x] Gripper control (position, open/close, object detection)
+- [x] Trajectory execution — multi-waypoint with progress callback
 - [x] ROS2 lifecycle node + action server + component architecture
-- [x] 25 Google Tests (connection, motion, gripper)
-- [ ] Trajectory execution — multi-waypoint with progress callback (Week 2)
+- [x] 33 Google Tests (connection, motion, gripper, trajectory)
+- [x] Hardware validated — 6 test suites on real Gen3
+- [x] FK/IK validated against Kortex API (error < 6mm)
 - [ ] Cartesian velocity control (Week 3)
 - [ ] Force/torque threshold callbacks (Week 4)
-
 ## Known Issues
 
 **`bad_function_call` on activation (Kortex SDK):** A single message prints to stderr after connecting to the real Gen3. Originates from a closed-source SDK internal thread. No functional impact — joint data publishes, all transitions succeed. Cannot be patched.
