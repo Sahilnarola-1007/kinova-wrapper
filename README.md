@@ -61,69 +61,43 @@ Three lines replace sixty. Resources are managed automatically via RAII. Every c
 
 ```mermaid
 graph TD
-    A["<b>User Code / ROS2</b><br/>Lifecycle nodes, action servers,<br/>pick-and-place logic"] 
-    -->|"single-line calls"| B
+    A[User Code / ROS2<br/>Lifecycle nodes · Action servers · Pick-and-place] 
+    -->|single-line calls| B[KinovaInterface Wrapper]
+    
+    B --> B1[Connection<br/>connect · disconnect · isConnected]
+    B --> B2[Motion<br/>moveToJointAngles · moveToCartesianPose<br/>sync + async variants]
+    B --> B3[Trajectory<br/>executeTrajectory · async + feedback callback]
+    B --> B4[Gripper<br/>open · close · setPosition · isObjectDetected]
+    B --> B5[State<br/>getJointAngles · getCurrentPose · getWrench]
+    B --> B6[Safety<br/>emergencyStop · clearEStop · setSpeedLimit]
 
-    subgraph B["KinovaInterface Wrapper"]
-        direction TB
-        B1["<b>Connection</b><br/>connect() · disconnect()<br/>isConnected()"]
-        B2["<b>Motion</b><br/>moveToJointAngles()<br/>moveToCartesianPose()<br/>async variants"]
-        B3["<b>Gripper</b><br/>open/close/setPosition<br/>isObjectDetected()"]
-        B4["<b>State</b><br/>getJointAngles()<br/>getCurrentPose()<br/>getWrench()"]
-        B5["<b>Safety</b><br/>emergencyStop()<br/>clearEStop()<br/>setSpeedLimit()"]
-        B6["<b>Trajectory</b><br/>executeTrajectory()<br/>async + feedback callback"]
-    end
-
-    B -->|"protobuf over TCP/IP"| C["<b>Kortex SDK</b><br/>TransportClientTcp → RouterClient<br/>→ SessionManager → BaseClient"]
-    C -->|"TCP/IP"| D["<b>Kinova Gen3 7-DOF</b><br/>+ Robotiq 2F-85<br/>192.168.1.10:10000"]
-
-    style A fill:#4a90d9,color:#fff,stroke:#2c5f8a
-    style B fill:#f0f4f8,stroke:#2c5f8a,stroke-width:2px
-    style B1 fill:#fff,stroke:#4a90d9
-    style B2 fill:#fff,stroke:#4a90d9
-    style B3 fill:#fff,stroke:#4a90d9
-    style B4 fill:#fff,stroke:#4a90d9
-    style B5 fill:#fff,stroke:#4a90d9
-    style B6 fill:#fff,stroke:#4a90d9
-    style C fill:#6c757d,color:#fff,stroke:#495057
-    style D fill:#28a745,color:#fff,stroke:#1e7e34
+    B -->|protobuf over TCP/IP| C[Kortex SDK<br/>Transport → Router → Session → BaseClient]
+    C -->|TCP/IP| D[Kinova Gen3 7-DOF + Robotiq 2F-85<br/>192.168.1.10:10000]
 ```
 
 ## Key Design Decisions
 
 ```mermaid
 graph LR
-    subgraph Resource["🔒 Resource Management"]
-        R1["unique_ptr RAII"] --> R2["Reverse destruction order<br/>base → session → router → transport"]
+    subgraph Resources
+        R1[unique_ptr RAII] --- R2[Reverse destruction order]
     end
 
-    subgraph Thread["🧵 Thread Safety"]
-        T1["Single std::mutex"] --> T2["All Kortex calls protected"]
-        T3["std::atomic flags"] --> T4["E-stop visible instantly<br/>even if mutex is held"]
+    subgraph Threads
+        T1[std::mutex on all Kortex calls] --- T2[std::atomic for e-stop flag]
     end
 
-    subgraph Motion["⚡ Motion Control"]
-        M1["Sync: bool return"] --> M2["Simple blocking calls"]
-        M3["Async: std::future"] --> M4["Non-blocking motion"]
+    subgraph Gripper
+        G1[SendGripperCommand is non-blocking] --- G2[Poll loop 100ms · 5s timeout]
+        G3[Object detection] --- G4[Commanded vs actual position gap]
     end
 
-    subgraph Gripper["🤖 Gripper Control"]
-        G1["SendGripperCommand"] --> G2["Non-blocking → poll loop<br/>100ms interval, 5s timeout"]
-        G3["Object detection"] --> G4["Commanded vs actual gap<br/>Stall = object grasped"]
+    subgraph Testing
+        TE1[USE_KORTEX_MOCK compile switch] --- TE2[33 mock + 6 hardware test suites]
     end
-
-    subgraph Testing["🧪 Testability"]
-        TE1["#ifdef USE_KORTEX_MOCK"] --> TE2["33 mock tests without hardware<br/>6 hardware test suites on real Gen3"]
-    end
-
-    style Resource fill:#e8f4fd,stroke:#2196F3,stroke-width:2px
-    style Thread fill:#fff3e0,stroke:#FF9800,stroke-width:2px
-    style Motion fill:#e8f5e9,stroke:#4CAF50,stroke-width:2px
-    style Gripper fill:#fce4ec,stroke:#E91E63,stroke-width:2px
-    style Testing fill:#f3e5f5,stroke:#9C27B0,stroke-width:2px
 ```
 
-> **Units convention:** Radians in public API, degrees internally (Kortex convention). Conversion happens at the API boundary — callers never deal with degrees.
+> **Units:** Radians in public API · Degrees internally (Kortex convention) · Conversion at API boundary
 
 ## Dependencies
 
@@ -197,7 +171,7 @@ struct TrajectoryPoint {
 
 using MotionCallback = std::function<void(
     const std::vector<double>& current_joints, double progress)>;
-    
+
 // Connection
 bool connect(const std::string& ip, uint32_t port = 10000);
 void disconnect();
