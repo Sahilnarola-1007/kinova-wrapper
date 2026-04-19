@@ -13,7 +13,7 @@
  *   - IK vs Kortex error < 6mm (same as FK, since IK converges to FK solution)
  */
 
-#include "kinova_interface/KinovaInterface.hpp"
+#include "kinova_wrapper/KinovaInterface.hpp"
 #include <kinova_kinematics/KinovaKinematics.hpp>
 #include <iostream>
 #include <cmath>

@@ -34,7 +34,7 @@
     #include <SessionManager.h>
     namespace k_api = Kinova::Api;
 #endif
-#include "Pose.hpp"
+#include "kinova_wrapper/Pose.hpp"
 
 namespace kinova_wrapper {
 

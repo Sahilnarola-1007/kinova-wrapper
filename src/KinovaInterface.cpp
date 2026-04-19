@@ -1,4 +1,4 @@
-#include"kinova_interface/KinovaInterface.hpp"
+#include "kinova_wrapper/KinovaInterface.hpp"
 #include<iostream>
 #include<stdexcept>
 #include<chrono>

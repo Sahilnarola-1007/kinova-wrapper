@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "kinova_interface/KinovaInterface.hpp"
+#include "kinova_wrapper/KinovaInterface.hpp"
 
 // =============================================================================
 // GripperTest — Tests for Robotiq 2F-85 gripper control via KinovaInterface
