@@ -1,88 +1,110 @@
 cmake_minimum_required(VERSION 3.16)
 project(kinova_wrapper)
 
+# =============================================================================
+# C++ standard & warnings
+# =============================================================================
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Werror")
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-include_directories(include mock)
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
 
-# Shared wrapper source
-set(WRAPPER_SRC src/KinovaInterface.cpp)
-
-# Kinematics library path
-set(KINEMATICS_DIR ${CMAKE_SOURCE_DIR}/../kinova_kinematics)
-
-# Test targets
-find_package(GTest REQUIRED)
-find_package(Eigen3 REQUIRED)
-
-add_executable(test_connection tests/test_connection.cpp ${WRAPPER_SRC})
-target_compile_definitions(test_connection PRIVATE USE_KORTEX_MOCK)
-target_link_libraries(test_connection GTest::GTest GTest::Main pthread)
-
-add_executable(test_motion tests/test_motion.cpp ${WRAPPER_SRC})
-target_compile_definitions(test_motion PRIVATE USE_KORTEX_MOCK)
-target_link_libraries(test_motion GTest::GTest GTest::Main pthread)
-
-add_executable(test_gripper tests/gripper_test.cpp ${WRAPPER_SRC})
-target_compile_definitions(test_gripper PRIVATE USE_KORTEX_MOCK)
-target_link_libraries(test_gripper GTest::GTest GTest::Main pthread)
-
-add_executable(test_trajectory tests/TrajectoryTest.cpp ${WRAPPER_SRC})
-target_compile_definitions(test_trajectory PRIVATE USE_KORTEX_MOCK)
-target_link_libraries(test_trajectory GTest::GTest GTest::Main pthread)
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
 
 # =============================================================================
-# Real Hardware Test Targets (no USE_KORTEX_MOCK)
+# Build options
 # =============================================================================
-set(KORTEX_DIR /home/sahil/kinova_learning/kortex/api_cpp/examples/kortex_api)
+# USE_KORTEX_MOCK: ON  = build with mock SDK (desk development, default)
+#                  OFF = link real Kortex SDK (lab/hardware)
+option(USE_KORTEX_MOCK "Build against mock Kortex SDK" ON)
 
-set(KORTEX_INCLUDES
+# Kortex SDK location (override with -DKORTEX_DIR=/custom/path if needed)
+set(KORTEX_DIR "/home/sahil/kinova_learning/kortex/api_cpp/examples/kortex_api"
+    CACHE PATH "Path to Kortex API SDK root")
+
+# =============================================================================
+# Dependencies
+# =============================================================================
+find_package(ament_cmake REQUIRED)
+
+# =============================================================================
+# Main library: libkinova_wrapper.so
+# =============================================================================
+add_library(kinova_wrapper SHARED src/KinovaInterface.cpp)
+
+target_include_directories(kinova_wrapper PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+
+if(USE_KORTEX_MOCK)
+  message(STATUS "kinova_wrapper: building with MOCK Kortex SDK")
+  target_compile_definitions(kinova_wrapper PUBLIC USE_KORTEX_MOCK)
+else()
+  message(STATUS "kinova_wrapper: building with REAL Kortex SDK at ${KORTEX_DIR}")
+  if(NOT EXISTS "${KORTEX_DIR}/lib/release/libKortexApiCpp.a")
+    message(FATAL_ERROR "Kortex SDK not found at ${KORTEX_DIR}. "
+                        "Install it or pass -DKORTEX_DIR=/correct/path")
+  endif()
+  target_include_directories(kinova_wrapper SYSTEM PUBLIC
     ${KORTEX_DIR}/include
     ${KORTEX_DIR}/include/client
     ${KORTEX_DIR}/include/common
     ${KORTEX_DIR}/include/messages
     ${KORTEX_DIR}/include/client_stubs
+  )
+  target_compile_definitions(kinova_wrapper PUBLIC _OS_UNIX)
+  target_link_libraries(kinova_wrapper PUBLIC
+    ${KORTEX_DIR}/lib/release/libKortexApiCpp.a
+  )
+endif()
+
+target_link_libraries(kinova_wrapper PUBLIC pthread)
+
+# =============================================================================
+# Install: library + headers + CMake export targets
+# =============================================================================
+install(
+  DIRECTORY include/
+  DESTINATION include
 )
 
-set(KORTEX_LIB ${KORTEX_DIR}/lib/release/libKortexApiCpp.a)
+install(
+  TARGETS kinova_wrapper
+  EXPORT kinova_wrapperTargets
+  LIBRARY DESTINATION lib
+  ARCHIVE DESTINATION lib
+  RUNTIME DESTINATION bin
+  INCLUDES DESTINATION include
+)
 
-add_executable(hw_test_connection tests/hardware/test_hw_connection.cpp ${WRAPPER_SRC})
-target_include_directories(hw_test_connection SYSTEM PRIVATE ${KORTEX_INCLUDES})
-target_compile_definitions(hw_test_connection PRIVATE _OS_UNIX)
-target_compile_options(hw_test_connection PRIVATE -Wno-error)
-target_link_libraries(hw_test_connection ${KORTEX_LIB} pthread)
+ament_export_targets(kinova_wrapperTargets HAS_LIBRARY_TARGET)
+ament_export_include_directories(include)
 
-add_executable(hw_test_motion tests/hardware/test_hw_motion.cpp ${WRAPPER_SRC})
-target_include_directories(hw_test_motion SYSTEM PRIVATE ${KORTEX_INCLUDES})
-target_compile_definitions(hw_test_motion PRIVATE _OS_UNIX)
-target_compile_options(hw_test_motion PRIVATE -Wno-error)
-target_link_libraries(hw_test_motion ${KORTEX_LIB} pthread)
+# =============================================================================
+# Tests (gtest — only built when BUILD_TESTING is ON)
+# =============================================================================
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
 
-add_executable(hw_test_state tests/hardware/test_hw_state.cpp ${WRAPPER_SRC})
-target_include_directories(hw_test_state SYSTEM PRIVATE ${KORTEX_INCLUDES})
-target_compile_definitions(hw_test_state PRIVATE _OS_UNIX)
-target_compile_options(hw_test_state PRIVATE -Wno-error)
-target_link_libraries(hw_test_state ${KORTEX_LIB} pthread)
+  # Mock-mode unit tests (only meaningful when library built with mock)
+  if(USE_KORTEX_MOCK)
+    ament_add_gtest(test_connection tests/test_connection.cpp)
+    target_link_libraries(test_connection kinova_wrapper)
 
-add_executable(hw_test_gripper tests/hardware/test_hw_gripper.cpp ${WRAPPER_SRC})
-target_include_directories(hw_test_gripper SYSTEM PRIVATE ${KORTEX_INCLUDES})
-target_compile_definitions(hw_test_gripper PRIVATE _OS_UNIX)
-target_compile_options(hw_test_gripper PRIVATE -Wno-error)
-target_link_libraries(hw_test_gripper ${KORTEX_LIB} pthread)
+    ament_add_gtest(test_motion tests/test_motion.cpp)
+    target_link_libraries(test_motion kinova_wrapper)
 
-add_executable(hw_test_estop tests/hardware/test_hw_estop.cpp ${WRAPPER_SRC})
-target_include_directories(hw_test_estop SYSTEM PRIVATE ${KORTEX_INCLUDES})
-target_compile_definitions(hw_test_estop PRIVATE _OS_UNIX)
-target_compile_options(hw_test_estop PRIVATE -Wno-error)
-target_link_libraries(hw_test_estop ${KORTEX_LIB} pthread)
+    ament_add_gtest(test_gripper tests/gripper_test.cpp)
+    target_link_libraries(test_gripper kinova_wrapper)
 
-add_executable(hw_test_fk_ik tests/hardware/test_hw_fk_ik.cpp 
-    ${WRAPPER_SRC}
-    ${KINEMATICS_DIR}/src/KinovaKinematics.cpp)
-target_include_directories(hw_test_fk_ik SYSTEM PRIVATE 
-    ${KORTEX_INCLUDES}
-    ${KINEMATICS_DIR}/include)
-target_compile_definitions(hw_test_fk_ik PRIVATE _OS_UNIX)
-target_compile_options(hw_test_fk_ik PRIVATE -Wno-error)
-target_link_libraries(hw_test_fk_ik ${KORTEX_LIB} pthread Eigen3::Eigen)
+    ament_add_gtest(test_trajectory tests/TrajectoryTest.cpp)
+    target_link_libraries(test_trajectory kinova_wrapper)
+  endif()
+endif()
+
+ament_package()

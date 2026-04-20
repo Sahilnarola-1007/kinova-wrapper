@@ -936,6 +936,11 @@ bool KinovaInterface::executeTrajectory(const std::vector<TrajectoryPoint> & way
         #endif
 
         for(size_t j=0; j< waypoints.size();j++){
+            if (e_stop_active_.load()) {
+                // e-stop was triggered from another thread — abort cleanly
+                return false;
+                }
+            
             k_api::Base::Action action;
 
             #ifdef USE_KORTEX_MOCK

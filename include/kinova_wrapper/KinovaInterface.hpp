@@ -26,7 +26,7 @@
 
 // Kortex SDK — use mock for local development, real SDK for hardware
 #ifdef USE_KORTEX_MOCK
-    #include "../../mock/kortex_mock.hpp"
+    #include "kinova_wrapper/kortex_mock.hpp"
 #else
     #include <BaseClientRpc.h>
     #include <RouterClient.h>
