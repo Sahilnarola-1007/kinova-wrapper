@@ -881,7 +881,7 @@ bool KinovaInterface::validateTrajectory(const std::vector<TrajectoryPoint> & wa
          return false;
         }
     
-    if(waypoints[0].time_from_start<=0.0){
+    if(waypoints[0].time_from_start< 0.0){
         std::cerr<<"start time is Invalid a"<<std::endl;
         return false;
             }

@@ -124,6 +124,32 @@ TEST(TrajectoryTest, EStopRejectsTrajectory) {
 
 }
 
+//Test 9
+TEST(TrajectoryTest,ZeroTimeFromStart){
+    kinova_wrapper::KinovaInterface kinova;
+    ASSERT_TRUE(kinova.connect("192.168.1.10"));
+
+    std::vector<kinova_wrapper::TrajectoryPoint>waypoints{
+        {{0.0, 0.1, 0.0, -0.5, 0.0, -0.3, 0.0}, 0.0},
+        {{0.0, 0.2, 0.0, -0.5, 0.0, -0.3, 0.0}, 1.0},
+        {{0.0, 0.3, 0.0, -0.5, 0.0, -0.3, 0.0}, 3.0},
+    };
+    EXPECT_TRUE(kinova.executeTrajectory(waypoints));
+}
+
+//Test 10
+TEST(TrajectoryTest,DuplicateTimestamps){
+    kinova_wrapper::KinovaInterface kinova;
+    ASSERT_TRUE(kinova.connect("192.168.1.10"));
+
+    std::vector<kinova_wrapper::TrajectoryPoint>waypoints{
+        {{0.0, 0.1, 0.0, -0.5, 0.0, -0.3, 0.0}, 1.0},
+        {{0.0, 0.2, 0.0, -0.5, 0.0, -0.3, 0.0}, 1.0},
+        {{0.0, 0.3, 0.0, -0.5, 0.0, -0.3, 0.0}, 3.0},
+    };
+    EXPECT_FALSE(kinova.executeTrajectory(waypoints));
+}
+
 int main(int argc, char** argv) {
     testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
