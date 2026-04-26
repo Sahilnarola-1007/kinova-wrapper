@@ -104,6 +104,9 @@ if(BUILD_TESTING)
 
     ament_add_gtest(test_trajectory tests/TrajectoryTest.cpp)
     target_link_libraries(test_trajectory kinova_wrapper)
+
+    ament_add_gtest(test_velocity tests/test_velocity.cpp)
+    target_link_libraries(test_velocity kinova_wrapper)
   endif()
 endif()
 

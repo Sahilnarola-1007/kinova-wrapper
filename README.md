@@ -70,6 +70,7 @@ graph TD
     B --> B4[Gripper<br/>open · close · setPosition · isObjectDetected]
     B --> B5[State<br/>getJointAngles · getCurrentPose · getWrench]
     B --> B6[Safety<br/>emergencyStop · clearEStop · setSpeedLimit]
+    B --> B7[Velocity<br/>setCartesianVelocity · stopMotion · watchdog auto-stop]
 
     B -->|protobuf over TCP/IP| C[Kortex SDK<br/>Transport → Router → Session → BaseClient]
     C -->|TCP/IP| D[Kinova Gen3 7-DOF + Robotiq 2F-85<br/>192.168.1.10:10000]
@@ -93,7 +94,7 @@ graph LR
     end
 
     subgraph Testing
-        TE1[USE_KORTEX_MOCK compile switch] --- TE2[33 mock + 6 hardware test suites]
+        TE1[USE_KORTEX_MOCK compile switch] --- TE2[38 mock + 6 hardware test suites]
     end
 ```
 
@@ -121,6 +122,7 @@ wrapper/
 │   ├── test_motion.cpp           # 7 tests (mock)
 │   ├── gripper_test.cpp          # 14 tests (mock)
 │   ├── TrajectoryTest.cpp        # 8 tests (mock)
+│   ├── test_velocity.cpp         # 5 tests (mock)
 │   └── hardware/
 │       ├── test_hw_connection.cpp # Real robot connect/disconnect
 │       ├── test_hw_motion.cpp     # Joint motion on real arm
@@ -146,6 +148,7 @@ make -j$(nproc)
 ./test_motion            # 7 tests
 ./test_gripper           # 14 tests
 ./test_trajectory        # 8 tests
+./test_velocity          # 5 tests
 
 ### Hardware Tests (real Gen3 required)
 ./hw_test_connection     # Connect/disconnect
@@ -155,7 +158,7 @@ make -j$(nproc)
 ./hw_test_estop          # E-stop interrupts motion
 ./hw_test_fk_ik          # FK/IK validated against Kortex API
 
-**33 mock tests passing. 6 hardware test suites validated on real Gen3.**
+**38 mock tests passing. 6 hardware test suites validated on real Gen3.**
 
 
 
@@ -206,6 +209,12 @@ bool executeTrajectory(const std::vector<TrajectoryPoint>& waypoints,
                        MotionCallback feedback_cb = nullptr);
 std::future<bool> executeTrajectoryAsync(const std::vector<TrajectoryPoint>& waypoints,
                                           MotionCallback feedback_cb = nullptr);
+
+// Velocity Control
+bool setCartesianVelocity(double vx, double vy, double vz,    // m/s
+                          double wx, double wy, double wz);    // deg/s
+void stopMotion();                                              // zero velocity, arm stays powered
+bool isVelocityActive() const;                                  // true if in velocity mode
 ```
 
 
@@ -237,11 +246,25 @@ The wrapper is consumed by `KinovaLifecycleController`, a ROS2 lifecycle node pr
 - [x] Gripper control (position, open/close, object detection)
 - [x] Trajectory execution — multi-waypoint with progress callback
 - [x] ROS2 lifecycle node + action server + component architecture
-- [x] 33 Google Tests (connection, motion, gripper, trajectory)
+- [x] 38 Google Tests (connection, motion, gripper, trajectory, velocity)
 - [x] Hardware validated — 6 test suites on real Gen3
 - [x] FK/IK validated against Kortex API (error < 6mm)
-- [ ] Cartesian velocity control (Week 3)
+- [x] Cartesian velocity control — three-layer safety (clamping, workspace boundary, watchdog auto-stop)
 - [ ] Force/torque threshold callbacks (Week 4)
+## Velocity Control
+
+Cartesian velocity commands with three-layer safety:
+- **Clamping**: Linear velocities capped at ±0.5 m/s, angular at ±40 deg/s
+- **Workspace boundary**: Per-axis check prevents EE from leaving safe volume; motion away from boundary always allowed
+- **Watchdog**: Background thread auto-stops arm if no command received within 100ms (control loop crash protection)
+
+```cpp
+// Move end-effector: +X at 0.1 m/s, slowly descending
+kinova.setCartesianVelocity(0.1, 0.0, -0.05, 0.0, 0.0, 0.0);
+std::this_thread::sleep_for(std::chrono::seconds(2));
+kinova.stopMotion();  // arm stops, stays powered — no e-stop clearing needed
+```
+
 ## Known Issues
 
 **`bad_function_call` on activation (Kortex SDK):** A single message prints to stderr after connecting to the real Gen3. Originates from a closed-source SDK internal thread. No functional impact — joint data publishes, all transitions succeed. Cannot be patched.

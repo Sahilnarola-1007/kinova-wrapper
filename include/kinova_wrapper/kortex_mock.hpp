@@ -88,7 +88,7 @@ namespace Base {
     // Gripper control modes
     constexpr uint32_t GRIPPER_POSITION = 0;
     constexpr uint32_t GRIPPER_SPEED = 1;
-    constexpr uint32_t GRIPPER_FORCE = 2;
+    constexpr uint32_t GRIPPER_FORCE = 2;   
 
     // Simulated joint angle measurement from robot
     struct JointAngle {
@@ -147,6 +147,20 @@ namespace Base {
     struct GripperRequest {
         uint32_t mode = 0;
     };
+
+    //Pure twist command
+    struct Twist
+        {
+            double linear_x=0.0, linear_y=0.0, linear_z=0.0;
+            double angular_x=0.0,angular_y=0.0,angular_z=0.0;
+        };
+
+
+    // Complete Twist command with nested twist and reference frame
+    struct TwistCommand{
+                uint32_t reference_frame = 0;
+                Twist twist;
+        };
 
     class BaseClient {
     public:
@@ -238,6 +252,30 @@ namespace Base {
             return g;
         }
 
+        //---Velocity commands----
+        void SendTwistCommand(const TwistCommand& T){
+            if(e_stop_){
+                throw std::runtime_error("Emergency stop is active");
+            }
+
+            stored_twist_command=T;
+
+        }
+
+        void Stop(){
+            stored_twist_command.twist.linear_x=0.0;
+            stored_twist_command.twist.linear_y=0.0;
+            stored_twist_command.twist.linear_z=0.0;
+            stored_twist_command.twist.angular_x=0.0;
+            stored_twist_command.twist.angular_y=0.0;
+            stored_twist_command.twist.angular_z=0.0;
+        }
+
+        TwistCommand GetLastTwist(){
+               return stored_twist_command; 
+        }
+        
+
     private:
         RouterClient* router_;  // non-owning
         bool e_stop_ = false;
@@ -246,7 +284,7 @@ namespace Base {
         Wrench current_wrench_;
         double stored_gripper_position_ = 0.0; // tracks position 
         bool simulate_object_ = false;
-
+        TwistCommand stored_twist_command;
     };
 
 }  // namespace Base

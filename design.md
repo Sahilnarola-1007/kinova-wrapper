@@ -42,6 +42,7 @@ The wrapper sits between application code (ROS2 nodes, pick-and-place logic, RL 
 │  │  getJointAngles        emergencyStop        getGripperPos  │  │
 │  │  getCurrentPose        clearEmergencyStop   isObjectDetect │  │
 │  │  getWrench             setSpeedLimit                       │  │
+│  │  setCartesianVelocity  stopMotion           isVelocActive  │  │
 │  └────────────────────────────────────────────────────────────┘  │
 │                                                                  │
 │  ┌────────────────────────────────────────────────────────────┐  │
@@ -52,6 +53,7 @@ The wrapper sits between application code (ROS2 nodes, pick-and-place logic, RL 
 │  │  unique_ptr ──── owns transport, router, session, base     │  │
 │  │  validation ──── joint limits, gripper range, connection    │  │
 │  │  conversion ──── radians↔degrees at API boundary           │  │
+│  │  watchdog ────── auto-stop velocity on control loop death   │  │
 │  └────────────────────────────────────────────────────────────┘  │
 │                                                                  │
 │  ┌────────────────────────────────────────────────────────────┐  │
@@ -96,6 +98,7 @@ The wrapper sits between application code (ROS2 nodes, pick-and-place logic, RL 
 | Object detection | Commanded vs actual position gap | Robotiq has no boolean sensor; stall = motor current spike = position gap |
 | Testability | `#ifdef USE_KORTEX_MOCK` compile-time switch | Mock mirrors real SDK types; tests run without hardware |
 | Copy/Move semantics | Deleted (non-copyable, non-movable) | Object owns hardware connection; copy = two owners = dangerous |
+| Velocity safety | Clamp + workspace boundary + watchdog | Three-layer defense: clamp prevents excessive speed, boundary prevents leaving safe volume, watchdog prevents runaway on control loop failure |
 
 ---
 
@@ -137,11 +140,18 @@ public:
     Pose getCurrentPose();
     std::vector<double> getWrench();
 
+
     // --- Safety ---
     void emergencyStop();
     bool isEStopActive() const;
     bool clearEmergencyStop();
     bool setSpeedLimit(double fraction);
+
+    // --- Velocity ---
+    bool setCartesianVelocity(double vx, double vy, double vz,
+                              double wx, double wy, double wz);
+    void stopMotion();
+    bool isVelocityActive() const;
 
 private:
     std::unique_ptr<k_api::TransportClientTcp> transport_;
@@ -168,6 +178,22 @@ private:
     static constexpr double kGripperTimeoutSec = 5.0;
     static constexpr double kGripperPositionTolerance = 0.01;
     static constexpr double kMaxGripperForceN = 235.0;
+
+    // --- Velocity ---
+    static constexpr double kMaxLinearVelocity = 0.5;   // m/s
+    static constexpr double kMaxAngularVelocity = 40.0;  // deg/s
+    static constexpr double kWatchdogTimeoutMs = 100.0;
+
+    // Workspace boundary (meters from base)
+    static constexpr double kWorkspaceXMin = 0.15, kWorkspaceXMax = 0.8;
+    static constexpr double kWorkspaceYMin = -0.13, kWorkspaceYMax = 0.5;
+    static constexpr double kWorkspaceZMin = 0.03, kWorkspaceZMax = 1.0;
+
+    std::thread watchdog_thread_;
+    std::atomic<bool> watchdog_running_{false};
+    std::atomic<bool> velocity_active_{false};
+    std::chrono::steady_clock::time_point last_velocity_time_;
+    std::mutex velocity_time_mutex_;  // protects last_velocity_time_ only
 };
 ```
 
@@ -314,6 +340,110 @@ Signature: bool executeTrajectory(const vector<TrajectoryPoint>& waypoints, Moti
 - Empty check, first time > 0, monotonic times, joint limit validation
 - Called under mutex_, never locks itself
 
+### setCartesianVelocity()
+
+```
+bool setCartesianVelocity(vx, vy, vz, wx, wy, wz)
+
+Purpose:    Send continuous Cartesian velocity command. Non-blocking.
+            Foundation for force control (Week 4) and visual servoing (Week 16).
+
+Steps:
+  1. Check connected_, e_stop_active_
+  2. Clamp linear components to ±0.5 m/s, angular to ±40 deg/s
+  3. Log warning if any clipping occurred (upstream gain tuning signal)
+  4. Lock mutex_
+  5. Read current EE pose via GetMeasuredCartesianPose()
+  6. Workspace boundary check — per-axis:
+     If EE at/beyond boundary AND velocity pushes further out → zero that component
+     Allows motion AWAY from boundary, blocks motion INTO it
+  7. Build TwistCommand (mock: direct assign, real: protobuf setters)
+  8. SendTwistCommand()
+  9. Unlock mutex_
+  10. Update last_velocity_time_ (under velocity_time_mutex_)
+  11. Start watchdog thread on first call
+
+Returns: true on success, false if disconnected/e-stop/SDK error
+```
+
+### stopMotion()
+
+```
+void stopMotion()
+
+Purpose:    Zero all velocities. Arm stops but remains powered and ready.
+            Unlike emergencyStop(), no clearing required before next command.
+
+Steps:
+  1. Set velocity_active_ = false (tell watchdog to stop monitoring)
+  2. Lock mutex_
+  3. Call base_client_->Stop()
+
+No precondition checks — safety function, must always attempt to stop.
+```
+
+### isVelocityActive()
+
+```
+bool isVelocityActive()
+
+Lock-free read of velocity_active_ atomic. Returns true if arm is in
+velocity control mode (between first setCartesianVelocity() and
+stopMotion()/watchdog timeout).
+```
+
+### Watchdog Design
+
+```
+Problem:
+  Velocity commands are continuous — the arm keeps moving at the last
+  commanded velocity. If the control loop crashes, hangs, or loses
+  connection, no one sends stopMotion(). The arm drifts indefinitely.
+
+Solution:
+  Background thread checks every 50ms:
+    if (velocity_active_ && now - last_velocity_time_ > 100ms)
+      → call stopMotion(), set velocity_active_ = false
+
+Lifecycle:
+  - Created on first setCartesianVelocity() call
+  - Runs until watchdog_running_ set to false
+  - Destructor sets watchdog_running_ = false, then joins thread
+
+Why separate velocity_time_mutex_?
+  mutex_ protects Kortex SDK calls and can be held for seconds
+  (e.g., during moveToJointAngles). If the watchdog locked mutex_
+  to read the timestamp, it would block behind slow motion commands
+  and fail to detect a dead velocity loop. velocity_time_mutex_
+  protects only last_velocity_time_ — locked for microseconds.
+
+Worst case drift:
+  100ms timeout + 50ms sleep period = ~150ms before auto-stop.
+  At max velocity (0.5 m/s), that's ~7.5cm of drift.
+  Workspace boundaries provide secondary protection.
+```
+
+### Workspace Boundary
+
+```
+A rectangular safety volume around the arm's operating space.
+Prevents velocity commands from driving the EE outside safe limits.
+
+Current limits (tuned to lab setup):
+  X: [0.15, 0.80] m    Y: [-0.13, 0.50] m    Z: [0.03, 1.00] m
+
+Logic: per-axis check BEFORE sending velocity command.
+  if (EE.x >= X_max && vx > 0) → vx = 0   (block outward motion)
+  if (EE.x <= X_min && vx < 0) → vx = 0   (block outward motion)
+  // ... same for Y and Z
+
+Key: motion AWAY from boundary is always allowed. This prevents
+the arm from getting stuck at a boundary with no way to recover.
+
+Z_min = 0.03m (3cm above table) is the most critical — prevents
+table crashes during downward velocity commands.
+```
+
 ### emergencyStop()
 
 ```
@@ -365,6 +495,8 @@ struct Pose {
 | `GetMeasuredWrench` unavailable | Not in our SDK build | Return empty vector, implement when SDK updated |
 | `CreateSessionInfo` differs mock vs real | Real uses `Session::CreateSessionInfo` + `set_username()` | `#ifdef` guard for struct type and accessors |
 | `RouterClient` constructor differs | Real takes error callback lambda, mock doesn't | `#ifdef` guard for constructor call |
+| `SendTwistCommand` is non-blocking | SDK design — arm moves continuously at last velocity | Must implement watchdog auto-stop; `Base::Stop()` zeroes velocity |
+| `TwistCommand` struct differs mock vs real | Real uses protobuf `set_reference_frame()` + `mutable_twist()` | `#ifdef` guard, same pattern as all other commands |
 KORTEX SESSION TIMEOUT (critical):
 Always set session_inactivity_timeout=60000 and 
 connection_inactivity_timeout=2000 in CreateSession.

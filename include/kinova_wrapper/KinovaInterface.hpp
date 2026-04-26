@@ -23,6 +23,8 @@
 #include <atomic>       // atomic<bool>
 #include <future>       // future, async
 #include <cstdint>      // uint32_t
+#include <thread>
+#include<chrono>
 
 // Kortex SDK — use mock for local development, real SDK for hardware
 #ifdef USE_KORTEX_MOCK
@@ -173,6 +175,19 @@ public:
        
     std::future<bool> executeTrajectoryAsync(const std::vector<TrajectoryPoint>& waypoints,
                             MotionCallback feedback_callback=nullptr);
+
+    // Send Cartesian velocity command to robot. Non-blocking, continuous.
+    // Clips velocities to safety limits. Rejects if workspace boundary violated.
+    // Starts watchdog on first call — auto-stops if no command within 100ms.
+    bool setCartesianVelocity(double vx, double vy, double vz,
+                            double wx, double wy, double wz);
+
+    // Immediately zero all velocities. Always attempts to stop — no precondition checks.
+    void stopMotion();
+
+    // Checks that if it is in velocity mode or not
+    bool isVelocityActive() const; 
+
 private:
     // =========================================================================
     // Kortex API objects — owned via unique_ptr (RAII)
@@ -233,6 +248,30 @@ private:
 
     //Trajectory helper
     bool validateTrajectory(const std::vector<TrajectoryPoint> & waypoints) const;
+
+    //Velocity command related constant
+    static constexpr double kMaxLinearVelocity=0.5;  // 0.5m/s
+    static constexpr double kMaxAngularVelocity=40;  // 40 deg/s
+
+    //conservative starting values accorting to lab setup- You can change according to your arm lab setup
+    static constexpr double kWorkspaceXMin = 0.15;  // meters from base
+    static constexpr double kWorkspaceXMax =  0.8;
+    static constexpr double kWorkspaceYMin = -0.13;
+    static constexpr double kWorkspaceYMax =  0.5;
+    static constexpr double kWorkspaceZMin =  0.03;  // 3cm above table — never go below
+    static constexpr double kWorkspaceZMax =  1.0;
+
+    // Watchdog — auto-stops if no velocity command received within timeout
+    std::thread watchdog_thread_;                    // background checker
+    std::atomic<bool> watchdog_running_{false};       // signals thread to exit
+    std::atomic<bool> velocity_active_{false};        // is the arm in velocity mode?
+    std::chrono::steady_clock::time_point last_velocity_time_;  // last command timestamp
+    std::mutex velocity_time_mutex_;                  // protects last_velocity_time_
+
+    static constexpr double kWatchdogTimeoutMs = 100.0;  // auto-stop threshold
+            
+
+
 };
 
 }  // namespace kinova_wrapper
