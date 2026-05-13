@@ -122,7 +122,12 @@ namespace kinova_wrapper
         {
             base_client_ = std::make_unique<k_api::Base::BaseClient>(router_.get());
             std::cout << "Base Client created" << std::endl;
-        }
+
+            //To get the real hardware's wrench readings.(Warning!- Doesn't exist in mock)
+            #ifndef USE_KORTEX_MOCK
+                base_cyclic_client_=std::make_unique<k_api::BaseCyclic::BaseCyclicClient>(router_.get());
+            #endif
+            }
         catch (const std::exception &e)
         {
             std::cout << "Base client is not created" << std::endl;
@@ -613,7 +618,7 @@ namespace kinova_wrapper
             pose.theta_z = kortex_pose.theta_z();
 #endif
 
-            return pose;
+        return pose;
         }
 
         catch (const std::exception &e)
@@ -626,8 +631,47 @@ namespace kinova_wrapper
     // fun 3: Reading wrench:(fx,fy,fz,tx,ty,tz)
     std::vector<double> KinovaInterface::getWrench()
     {
+        if (!connected_.load())
+        {
+            std::cerr << "Not connected! Wrench reading failed" << std::endl;
+            return {};
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
 
-        return {};
+        try{
+            std::vector<double> wrench_vec;
+        
+        # ifdef USE_KORTEX_MOCK
+            auto wrench_mock=base_client_->GetMeasuredWrench();  //In the mock, it is struct
+            wrench_vec.push_back(wrench_mock.force_x);
+            wrench_vec.push_back(wrench_mock.force_y);
+            wrench_vec.push_back(wrench_mock.force_z);
+            wrench_vec.push_back(wrench_mock.torque_x);
+            wrench_vec.push_back(wrench_mock.torque_y);
+            wrench_vec.push_back(wrench_mock.torque_z);
+
+        #else
+            auto wrench_real=base_cyclic_client_->RefreshFeedback();
+
+            //Accessing the wrench value from the real hardware
+            wrench_vec.push_back(wrench_real.base().tool_external_wrench_force_x());
+            wrench_vec.push_back(wrench_real.base().tool_external_wrench_force_y());
+            wrench_vec.push_back(wrench_real.base().tool_external_wrench_force_z());
+            wrench_vec.push_back(wrench_real.base().tool_external_wrench_torque_x());
+            wrench_vec.push_back(wrench_real.base().tool_external_wrench_torque_y());
+            wrench_vec.push_back(wrench_real.base().tool_external_wrench_torque_z());
+        
+        #endif
+        
+        return wrench_vec;
+        }
+        
+        catch(const std::exception &e)
+        {
+            std::cerr << "wrench reading failed: " << e.what() << std::endl;
+            return {};
+        }
+
     }
 
     // =============================================================================

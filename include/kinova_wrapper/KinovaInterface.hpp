@@ -34,6 +34,7 @@
     #include <RouterClient.h>
     #include <TransportClientTcp.h>
     #include <SessionManager.h>
+    #include <BaseCyclicClientRpc.h>
     namespace k_api = Kinova::Api;
 #endif
 #include "kinova_wrapper/Pose.hpp"
@@ -198,7 +199,11 @@ private:
     std::unique_ptr<k_api::RouterClient>       router_;
     std::unique_ptr<k_api::SessionManager>     session_manager_;
     std::unique_ptr<k_api::Base::BaseClient>   base_client_;
-
+    
+    // Only for real hardware otherwise it will fail on the mock.
+    #ifndef USE_KORTEX_MOCK
+        std::unique_ptr<k_api::BaseCyclic::BaseCyclicClient> base_cyclic_client_;
+    #endif
     // =========================================================================
     // Thread safety
     // =========================================================================
@@ -269,6 +274,7 @@ private:
     std::mutex velocity_time_mutex_;                  // protects last_velocity_time_
 
     static constexpr double kWatchdogTimeoutMs = 100.0;  // auto-stop threshold
+
             
 
 
