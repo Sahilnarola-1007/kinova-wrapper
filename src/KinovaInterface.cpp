@@ -1183,8 +1183,9 @@ namespace kinova_wrapper
 
         try
         {
-
+            
             base_client_->SendTwistCommand(twist_cmd);
+            std::cerr << "TWIST SENT: vx=" << vx << " vy=" << vy << " vz=" << vz << "\n";
 
             // Update watchdog state
             velocity_active_.store(true);

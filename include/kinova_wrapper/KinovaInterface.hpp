@@ -255,7 +255,7 @@ private:
     bool validateTrajectory(const std::vector<TrajectoryPoint> & waypoints) const;
 
     //Velocity command related constant
-    static constexpr double kMaxLinearVelocity=0.5;  // 0.5m/s
+    static constexpr double kMaxLinearVelocity=0.2;  // 0.5m/s
     static constexpr double kMaxAngularVelocity=40;  // 40 deg/s
 
     //conservative starting values accorting to lab setup- You can change according to your arm lab setup
