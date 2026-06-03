@@ -263,7 +263,7 @@ private:
     static constexpr double kWorkspaceXMax =  0.8;
     static constexpr double kWorkspaceYMin = -0.13;
     static constexpr double kWorkspaceYMax =  0.5;
-    static constexpr double kWorkspaceZMin =  0.03;  // 3cm above table — never go below
+    static constexpr double kWorkspaceZMin =  -0.01;  // 3cm above table — never go below
     static constexpr double kWorkspaceZMax =  1.0;
 
     // Watchdog — auto-stops if no velocity command received within timeout
