@@ -238,8 +238,6 @@ The wrapper is consumed by `KinovaLifecycleController`, a ROS2 lifecycle node pr
 
 ## Roadmap
 
-## Roadmap
-
 - [x] Connection management (RAII, auto-cleanup, reconnection)
 - [x] Joint and Cartesian motion (sync + async)
 - [x] Emergency stop + joint limit validation
@@ -250,7 +248,11 @@ The wrapper is consumed by `KinovaLifecycleController`, a ROS2 lifecycle node pr
 - [x] Hardware validated — 6 test suites on real Gen3
 - [x] FK/IK validated against Kortex API (error < 6mm)
 - [x] Cartesian velocity control — three-layer safety (clamping, workspace boundary, watchdog auto-stop)
-- [ ] Force/torque threshold callbacks (Week 4)
+- [x] Admittance controller integration — 6-DOF force/torque compliant motion
+- [x] Surface wiping demo — PI force control maintaining 5N contact at 0.02 m/s
+- [ ] Perception pipeline — YOLOv8 + FoundationPose via built-in RealSense (Week 5-8)
+- [ ] RL sim-to-real — MuJoCo SAC training → ONNX deployment (Week 9-12)
+- [ ] Visual servoing capstone — programmatic + RL pick-and-place (Week 13-16)
 ## Velocity Control
 
 Cartesian velocity commands with three-layer safety:
@@ -265,6 +267,18 @@ std::this_thread::sleep_for(std::chrono::seconds(2));
 kinova.stopMotion();  // arm stops, stays powered — no e-stop clearing needed
 ```
 
+**Measured performance:** `SendTwistCommand()` blocks for ~73ms per call (gRPC
+round-trip to the arm's internal controller). This caps real-time velocity loops
+at ~13 Hz through the high-level API. Kinova documents 40 Hz max. Adequate for
+admittance control and surface wiping (1.5 mm per update at 20 mm/s). Upgrade
+path: Kortex low-level servoing API (1 kHz, joint-space commands).
+
 ## Known Issues
+
+**High-level API loop rate (~13 Hz):** `SendTwistCommand()` takes ~73ms (gRPC
+round-trip). This is a Kortex SDK architectural limitation, not a bug. All
+math and state reads combined take <1ms — the API call is the sole bottleneck.
+Adequate for admittance control and surface wiping; visual servoing will require
+migration to low-level servoing (1 kHz, joint-space).
 
 **`bad_function_call` on activation (Kortex SDK):** A single message prints to stderr after connecting to the real Gen3. Originates from a closed-source SDK internal thread. No functional impact — joint data publishes, all transitions succeed. Cannot be patched.

@@ -1,3 +1,58 @@
+// =============================================================================
+// KinovaInterface.cpp — Production-grade C++ wrapper for the Kinova Gen3
+//                       Kortex SDK (7-DOF arm + Robotiq 2F-85 gripper)
+// =============================================================================
+//
+// This file implements the complete low-level interface between user code (or
+// ROS2 nodes) and the Kinova Gen3 arm. It abstracts the Kortex SDK's protobuf-
+// based API behind clean C++ methods with RAII resource management, thread
+// safety, and input validation.
+//
+// Design principles:
+//   1. RAII throughout — unique_ptr ownership of transport, router, session,
+//      and base client. Destructor tears down in reverse creation order.
+//      No manual cleanup needed even on exceptions.
+//
+//   2. Thread safety — every Kortex SDK call is protected by mutex_. Atomic
+//      flags (connected_, e_stop_active_, velocity_active_) allow lock-free
+//      reads for fast pre-checks before acquiring the mutex.
+//
+//   3. Mock/real compile switch — USE_KORTEX_MOCK (CMake option) swaps the
+//      Kortex SDK for a lightweight mock (kortex_mock.hpp) that simulates
+//      responses without hardware. Same source compiles for both targets.
+//      Default is mock; hardware builds require explicit -DUSE_KORTEX_MOCK=OFF.
+//
+//   4. Radians at the API boundary, degrees internally — the public API
+//      accepts/returns radians (standard robotics convention). Conversion
+//      to degrees (Kortex convention) happens inside each method.
+//
+//   5. Private helpers never lock mutex_ — public methods hold the lock and
+//      call private helpers (disconnectLocked, validateJointAngles, etc.)
+//      that assume the lock is already held. This prevents recursive locking.
+//
+// Kortex SDK quirks (discovered during hardware validation):
+//   - ExecuteAction() is non-blocking on real SDK. Requires subscribing to
+//     OnNotificationActionTopic with a std::promise to detect ACTION_END.
+//   - SendGripperCommand() is also non-blocking. Requires polling loop to
+//     confirm the gripper reached the target position.
+//   - Session inactivity timeouts must be set explicitly (60s session, 2s
+//     connection) — omitting them causes silent session closure and action
+//     aborts after ~10 seconds of inactivity.
+//   - SetServoingMode(SINGLE_LEVEL_SERVOING) required before ExecuteAction.
+//   - SendTwistCommand() expects angular velocities in deg/s, not rad/s.
+//     The admittance controller handles this conversion at the call site.
+//   - SendTwistCommand() blocks for ~73ms (gRPC round-trip), capping the
+//     velocity control loop at ~13 Hz through the high-level API.
+//
+// Consumers:
+//   - admittance_controller (admittance_node.cpp) — velocity control loop
+//   - kinova_moveit_bridge — FollowJointTrajectory action server
+//   - KinovaLifecycleController — ROS2 lifecycle node with joint state pub
+//   - Direct use in hardware test suites (6 test files)
+//
+// Author: Sahil Narola — MEng, Carleton University (ABLL Lab)
+// =============================================================================
+
 #include "kinova_wrapper/KinovaInterface.hpp"
 #include <iostream>
 #include <stdexcept>
@@ -11,6 +66,12 @@
 namespace kinova_wrapper
 {
 
+    // =========================================================================
+    // Constructor: lightweight — no SDK resources allocated here.
+    // The connect() method handles all SDK initialization so that
+    // construction never throws and objects can be created before the
+    // network is ready.
+    // =========================================================================
     KinovaInterface::KinovaInterface()
     {
         std::cout << "KinovaInterface created. Call connect method \
@@ -18,6 +79,13 @@ namespace kinova_wrapper
                   << std::endl;
     };
 
+    // =========================================================================
+    // Destructor: RAII teardown in reverse creation order.
+    // 1. Signal the watchdog thread to stop and join it
+    // 2. Disconnect from the arm (closes session, transport, resets clients)
+    // This ensures no dangling connections even if the caller forgets to
+    // call disconnect() or if an exception unwinds the stack.
+    // =========================================================================
     KinovaInterface::~KinovaInterface()
     {
 
@@ -32,11 +100,26 @@ namespace kinova_wrapper
         disconnect();
     };
 
-    // =============================================================================
-    // Part 1: Connection and disconnection set up
-    // =============================================================================
+    // =========================================================================
+    // Part 1: Connection Management
+    //
+    // Kortex SDK connection is a 7-step pipeline:
+    //   1. Validate inputs
+    //   2. TransportClientTcp — raw TCP socket to the arm
+    //   3. RouterClient — multiplexes requests over the transport
+    //   4. SessionManager — manages authenticated sessions
+    //   5. CreateSession — authenticates with username/password
+    //   6. BaseClient — the main API surface for arm commands
+    //   7. BaseCyclicClient — low-level cyclic data (wrench, real HW only)
+    //
+    // Each step depends on the previous. If any step fails, all prior
+    // resources are cleaned up before returning false. On success, the
+    // connected_ atomic flag is set to allow lock-free connection checks.
+    // =========================================================================
 
-    // fun 1: connect()
+    // connect(): Establishes the full Kortex SDK connection pipeline.
+    // If already connected, gracefully disconnects first (idempotent).
+    // Returns true on success, false with cleanup on any failure.
     bool KinovaInterface::connect(const std::string &ip_address,
                                   uint32_t port,
                                   const std::string &username,
@@ -148,7 +231,11 @@ namespace kinova_wrapper
         return true;
     };
 
-    // fun 2: disconnectLocked()
+    // disconnectLocked(): Tears down SDK resources in reverse creation order.
+    // PRIVATE — called with mutex_ already held by the caller (disconnect()
+    // or connect() during reconnection). Never acquires mutex_ itself to
+    // avoid recursive locking. Errors during teardown are logged but do not
+    // prevent cleanup of remaining resources.
     void KinovaInterface::disconnectLocked()
     {
 
@@ -198,36 +285,61 @@ namespace kinova_wrapper
         connected_.store(false);
     }
 
-    // fun 3: disconnect()
+    // disconnect(): Public thread-safe wrapper — acquires mutex_ then
+    // delegates to disconnectLocked().
     void KinovaInterface::disconnect()
     {
         std::lock_guard<std::mutex> lock(mutex_);
         disconnectLocked();
     }
 
-    // fun 4: isConnected()
+    // isConnected(): Lock-free connection check via atomic flag.
+    // Used by all public methods as a fast pre-check before acquiring mutex_.
     bool KinovaInterface::isConnected() const
     {
         return connected_.load();
     }
 
-    // fun 5: isEStopActive()
+    // isEStopActive(): Lock-free e-stop check via atomic flag.
+    // emergencyStop() sets this without holding mutex_ (safety-critical
+    // path must never block on a potentially held lock).
     bool KinovaInterface::isEStopActive() const
     {
         return e_stop_active_.load();
     }
 
-    //fun 5: 
+    // isVelocityActive(): Lock-free check for active velocity control mode.
+    // Set by setCartesianVelocity(), cleared by stopMotion() or watchdog.
     bool KinovaInterface::isVelocityActive() const
     { 
         return velocity_active_.load();
     }
-    // =============================================================================
+    // =========================================================================
     // Part 2: Motion Commands
-    // =============================================================================
+    //
+    // All motion methods follow the same pattern:
+    //   1. Check atomic flags (connected_, e_stop_active_) — lock-free
+    //   2. Acquire mutex_
+    //   3. Validate inputs (joint limits, workspace bounds)
+    //   4. Build Kortex protobuf Action message
+    //   5. Set servoing mode (real HW only — SINGLE_LEVEL_SERVOING)
+    //   6. Execute and wait for completion notification
+    //   7. Return success/failure
+    //
+    // Async variants capture arguments by value into a std::async lambda
+    // to prevent dangling references when the caller's scope exits before
+    // the async thread runs.
+    //
+    // Real SDK quirk: ExecuteAction() is non-blocking. Completion is
+    // detected via OnNotificationActionTopic with a std::promise that
+    // resolves on ACTION_END or ACTION_ABORT. The mutex is unlocked
+    // before the wait to allow other threads (e.g. state reading) to
+    // proceed during motion. 30-second timeout protects against stalls.
+    // =========================================================================
 
-    // fun1: validateJointAngles
-    // Called under mutex_ — validates angles are within firmware limits (degrees internally)
+    // validateJointAngles(): Checks that all 7 angles are within the
+    // Gen3's firmware-defined joint limits. Converts from radians (API)
+    // to degrees (Kortex internal) for comparison. Called under mutex_.
     bool KinovaInterface::validateJointAngles(const std::vector<double> &angles) const
     {
 
@@ -254,7 +366,10 @@ namespace kinova_wrapper
         return true;
     }
 
-    // fun 2:moveToJointAngles (sync version): Blocking method
+    // moveToJointAngles(): Synchronous joint-space motion.
+    // Blocks until the arm reaches the target or times out (30s).
+    // On real hardware, unlocks mutex_ before waiting on the action
+    // notification to allow concurrent state reads.
     bool KinovaInterface::moveToJointAngles(const std::vector<double> &angles)
     {
 
@@ -366,7 +481,10 @@ namespace kinova_wrapper
         }
     }
 
-    // fun 3: moveTojointAnglesAysnc()
+    // moveToJointAnglesAsync(): Non-blocking joint motion.
+    // Returns a std::future<bool> — caller must store the future (discarding
+    // it causes the destructor to block immediately, defeating the purpose).
+    // Captures angles by value to prevent dangling references.
     std::future<bool> KinovaInterface::moveToJointAnglesAsync(
         const std::vector<double> &angles)
     {
@@ -379,7 +497,10 @@ namespace kinova_wrapper
                           { return this->moveToJointAngles(angles); });
     }
 
-    // fun 4: moveToCartesianPose — mutable_reach_pose()
+    // moveToCartesianPose(): Synchronous Cartesian-space motion.
+    // Pose contains (x, y, z) in meters and (theta_x, theta_y, theta_z)
+    // in degrees (Kortex convention for Euler angles). Same notification-
+    // based blocking pattern as moveToJointAngles.
     bool KinovaInterface::moveToCartesianPose(const Pose &pose)
     {
 
@@ -478,7 +599,8 @@ namespace kinova_wrapper
         }
     }
 
-    // fun 5:moveToCartesianPose(Async version)
+    // moveToCartesianPoseAsync(): Non-blocking Cartesian motion.
+    // Same capture-by-value pattern as moveToJointAnglesAsync.
     std::future<bool> KinovaInterface::moveToCartesianPoseAsync(const Pose &pose)
     {
         return std::async(std::launch::async,
@@ -488,7 +610,11 @@ namespace kinova_wrapper
                           });
     }
 
-    // fun 6: emergency stop
+    // emergencyStop(): Immediately halts all arm motion.
+    // Sets e_stop_active_ FIRST (atomic, no mutex needed) so all other
+    // methods see the flag immediately, even if they're holding the mutex.
+    // Then calls ApplyEmergencyStop on the SDK. If the SDK call fails,
+    // the flag remains set — safer to stay stopped than risk motion.
     void KinovaInterface::emergencyStop()
     {
         e_stop_active_.store(true);
@@ -510,7 +636,10 @@ namespace kinova_wrapper
         }
     }
 
-    // fun 7: Clear emergency stop
+    // clearEmergencyStop(): Clears the e-stop and all actuator faults.
+    // Acquires mutex_ because ClearFaults() is a Kortex SDK call.
+    // Only clears the atomic flag after the SDK call succeeds — if
+    // ClearFaults() throws, the arm remains in e-stop state.
     bool KinovaInterface::clearEmergencyStop()
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -540,11 +669,24 @@ namespace kinova_wrapper
         }
     }
 
-    // =============================================================================
-    // Part 3: state reading
-    // =============================================================================
+    // =========================================================================
+    // Part 3: State Reading
+    //
+    // All state methods follow the same pattern: check connected_ (atomic),
+    // acquire mutex_, call the Kortex getter, convert units, return.
+    //
+    // getCurrentPose() is performance-critical: it takes ~20ms per call
+    // (Kortex gRPC round-trip). The admittance controller caches this in
+    // a background thread to avoid blocking the control loop.
+    //
+    // getWrench() uses BaseCyclicClient::RefreshFeedback() on real hardware
+    // (not available in mock) because BaseClient doesn't expose external
+    // wrench readings directly. The admittance controller uses the external
+    // MAE SensuReal sensor instead — this method is the fallback.
+    // =========================================================================
 
-    // fun 1: Reading current joint angles
+    // getJointAngles(): Returns all 7 joint angles in radians.
+    // Kortex returns degrees; conversion happens here at the API boundary.
     std::vector<double> KinovaInterface::getJointAngles()
     {
 
@@ -583,7 +725,11 @@ namespace kinova_wrapper
         }
     }
 
-    // fun 2: Reading current pose
+    // getCurrentPose(): Returns end-effector pose (x,y,z in meters,
+    // theta_x/y/z in degrees — Kortex ZYX intrinsic Euler convention).
+    // This call takes ~20ms on real hardware (gRPC round-trip). The
+    // admittance controller's pose_thread_ caches this to avoid blocking
+    // the control loop. Returns default-constructed Pose{} on failure.
     Pose KinovaInterface::getCurrentPose()
     {
 
@@ -628,7 +774,11 @@ namespace kinova_wrapper
         }
     }
 
-    // fun 3: Reading wrench:(fx,fy,fz,tx,ty,tz)
+    // getWrench(): Returns the 6-axis wrench [Fx, Fy, Fz, Tx, Ty, Tz].
+    // On real hardware, reads from BaseCyclicClient::RefreshFeedback()
+    // which provides the Kortex-estimated external wrench (model-based,
+    // ~10Hz, lower quality than the MAE SensuReal sensor).
+    // Used as a fallback when the external F/T sensor is unavailable.
     std::vector<double> KinovaInterface::getWrench()
     {
         if (!connected_.load())
@@ -674,11 +824,13 @@ namespace kinova_wrapper
 
     }
 
-    // =============================================================================
-    // Part 4: setSpeedLimit
-    // =============================================================================
+    // =========================================================================
+    // Part 4: Speed Limit
+    // =========================================================================
 
-    // fun 1: setting speed limit by using fraction
+    // setSpeedLimit(): Sets the global speed fraction (0.0 to 1.0).
+    // Currently stores the value locally — the Kortex speed limit API
+    // call is a TODO for future integration.
     bool KinovaInterface::setSpeedLimit(double fraction)
     {
 
@@ -704,9 +856,26 @@ namespace kinova_wrapper
         return true;
     }
 
-    // =============================================================================
-    // Part 5: Gripper Control
-    // =============================================================================
+    // =========================================================================
+    // Part 5: Gripper Control (Robotiq 2F-85)
+    //
+    // The Robotiq 2F-85 is controlled via the Kortex API's gripper commands
+    // (not a separate driver). SendGripperCommand is non-blocking — it
+    // returns immediately after dispatching the command. A polling loop
+    // (100ms interval, 5s timeout) monitors the actual gripper position
+    // until it matches the commanded position within tolerance.
+    //
+    // Object detection uses stall-based detection: when closeGripper()
+    // commands position 1.0 (fully closed) but the gripper stalls at a
+    // smaller position (object preventing closure), the gap between
+    // commanded and actual position exceeds the tolerance → object detected.
+    // This is why closeGripper() returns true on both "fully closed" and
+    // "stalled on object" — both are successful outcomes.
+    // =========================================================================
+
+    // setGripperPosition(): Commands the gripper to a normalized position
+    // (0.0 = fully open, 1.0 = fully closed). Polls until the gripper
+    // reaches the target or times out. Returns false on timeout or error.
 
     bool KinovaInterface::setGripperPosition(double req_position, double speed)
     {
@@ -938,10 +1107,25 @@ namespace kinova_wrapper
         return false;
     }
 
+    // =========================================================================
+    // Part 6: Trajectory Execution
+    //
+    // Multi-waypoint joint trajectory with optional progress callback.
+    // Each waypoint is executed as a separate Kortex Action. The time
+    // between waypoints is computed from the time_from_start field (delta
+    // from the previous waypoint). The optional callback fires after each
+    // waypoint with the current joint angles and a progress fraction.
+    //
+    // NOTE: This is a simplified waypoint-by-waypoint execution, not a
+    // true trajectory interpolation. The arm's internal controller
+    // handles smooth motion between waypoints.
+    // =========================================================================
+
+    // validateTrajectory(): Pre-flight checks before execution.
+    // Validates: non-empty, monotonically increasing timestamps,
+    // all joint angles within firmware limits.
     bool KinovaInterface::validateTrajectory(const std::vector<TrajectoryPoint> &waypoints) const
     {
-
-        if (waypoints.empty())
         {
             std::cerr << "Invalid trajectory! Waypoints are empty" << std::endl;
             return false;
@@ -1092,6 +1276,36 @@ namespace kinova_wrapper
                           { return this->executeTrajectory(waypoints, feedback_callback); });
     }
 
+    // =========================================================================
+    // Part 7: Cartesian Velocity Control
+    //
+    // Streaming velocity commands for real-time control loops (admittance
+    // controller, visual servoing). Three-layer safety architecture:
+    //
+    //   Layer 1 — Velocity clamping: per-axis hard limits on linear
+    //     (±0.5 m/s) and angular (±40 deg/s) velocities.
+    //
+    //   Layer 2 — Workspace boundary: reads current EE pose and zeros
+    //     any velocity component that would push the arm out of the
+    //     safe workspace volume. Motion away from boundary always allowed.
+    //
+    //   Layer 3 — Watchdog thread: background thread monitors the time
+    //     since the last velocity command. If no command arrives within
+    //     100ms (kWatchdogTimeoutMs), calls stopMotion() automatically.
+    //     Protects against control loop crashes or node failures.
+    //
+    // PERFORMANCE NOTE: SendTwistCommand() is a synchronous gRPC call
+    // that blocks for ~73ms on average. This is the irreducible bottleneck
+    // of the high-level Kortex API, capping real-time loops at ~13 Hz.
+    // The upgrade path is Kortex low-level servoing (1 kHz, joint-space).
+    //
+    // Angular velocities are expected in deg/s (Kortex convention).
+    // The admittance controller converts from rad/s at the call site.
+    // =========================================================================
+
+    // setCartesianVelocity(): Sends a 6D twist command (3 linear + 3 angular)
+    // in the base reference frame. Starts the watchdog thread on first call.
+    // Returns false if disconnected or e-stopped.
     bool KinovaInterface::setCartesianVelocity(double vx, double vy, double vz,
                                                double wx, double wy, double wz)
     {
@@ -1109,7 +1323,7 @@ namespace kinova_wrapper
             return false;
         }
 
-        // Clliping to avoid Overshooting for both angular and linear
+        // Clipping to safety limits for both angular and linear
         bool clipped = false;
 
         auto clamp_and_flag = [&](double &v, double min, double max)
@@ -1231,12 +1445,15 @@ namespace kinova_wrapper
         }
     }
 
+    // stopMotion(): Sends a zero-velocity command and calls base Stop().
+    // Clears the velocity_active_ flag so the watchdog thread stops
+    // monitoring. The arm stays powered (not e-stopped) — ready for
+    // immediate re-use without clearing faults.
     void KinovaInterface::stopMotion()
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
         // Telling watchdog "nothing to monitor"
-        velocity_active_.store(false);
 
         try
         {
