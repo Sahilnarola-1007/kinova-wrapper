@@ -110,4 +110,17 @@ if(BUILD_TESTING)
   endif()
 endif()
 
+# Hardware tests (real SDK only, manual run — never in CI)
+if(NOT USE_KORTEX_MOCK)
+  find_package(kinova_kinematics REQUIRED)
+  find_package(Eigen3 REQUIRED)
+
+  add_executable(test_hw_fk_ik tests/hardware/test_hw_fk_ik.cpp)
+  target_link_libraries(test_hw_fk_ik
+    kinova_wrapper
+    kinova_kinematics::kinova_kinematics
+    Eigen3::Eigen
+  )
+endif()
+
 ament_package()
