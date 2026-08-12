@@ -23,9 +23,12 @@ endif()
 option(USE_KORTEX_MOCK "Build against mock Kortex SDK" ON)
 
 # Kortex SDK location (override with -DKORTEX_DIR=/custom/path if needed)
-set(KORTEX_DIR "/home/sahil/kinova_learning/kortex/api_cpp/examples/kortex_api"
-    CACHE PATH "Path to Kortex API SDK root")
-
+if(DEFINED ENV{KORTEX_DIR})
+  set(KORTEX_DIR "$ENV{KORTEX_DIR}" CACHE PATH "Path to Kortex C++ SDK")
+else()
+  set(KORTEX_DIR "$ENV{HOME}/kinova_learning/kortex/api_cpp/examples/kortex_api"
+      CACHE PATH "Path to Kortex C++ SDK")
+endif()
 # =============================================================================
 # Dependencies
 # =============================================================================
