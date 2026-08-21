@@ -1,284 +1,399 @@
-# KinovaInterface
+# kinova_wrapper
 
-A production-grade C++ wrapper around the Kinova Kortex API for the Gen3 7-DOF robotic arm with Robotiq 2F-85 gripper. Built with modern C++17 patterns (RAII, smart pointers, thread safety) and designed as the control foundation for a visual servoing pick-and-place capstone.
+A C++17 wrapper around the Kinova Kortex SDK for the Gen3 7-DOF arm and Robotiq 2F-85 gripper, packaged as an `ament_cmake` ROS 2 package.
 
-## The Problem
+It replaces the SDK's manual resource management and protobuf boilerplate with RAII-owned connections, mutex-protected calls, validated inputs, and a compile-time mock that lets the whole package build and be unit-tested with no robot attached.
 
-The Kortex SDK is powerful but requires significant boilerplate for every operation. A simple "connect and move" sequence looks like this:
+| | |
+|---|---|
+| **Package** | `kinova_wrapper` v0.1.0 |
+| **Build system** | `ament_cmake` (ROS 2, colcon) |
+| **Language** | C++17 |
+| **Target** | Kinova Gen3 7-DOF + Robotiq 2F-85, over TCP/IP (default `192.168.1.10:10000`) |
+| **License** | MIT |
+| **Maintainer** | Sahil Narola — Advanced Biomechatronics and Locomotion Lab, Carleton University |
 
-```cpp
-// Raw Kortex: ~60 lines for a single motion command
-auto* transport = new TransportClientTcp();
-transport->connect("192.168.1.10", 10000);
-auto* router = new RouterClient(transport, [](auto err){ /* error cb */ });
-auto* session_mgr = new SessionManager(router);
-auto session_info = Session::CreateSessionInfo();
-session_info.set_username("admin");
-session_info.set_password("admin");
-session_mgr->CreateSession(session_info);
-auto* base = new Base::BaseClient(router);
+---
 
-// Build protobuf action (another 15+ lines)
-Base::Action action;
-auto* angles = action.mutable_reach_joint_angles()->mutable_joint_angles();
-for (int i = 0; i < 7; i++) {
-    auto* j = angles->add_joint_angles();
-    j->set_joint_identifier(i);
-    j->set_value(target[i]);
-}
-auto mode = Base::ServoingModeInformation();
-mode.set_servoing_mode(Base::ServoingMode::SINGLE_LEVEL_SERVOING);
-base->SetServoingMode(mode);
-base->ExecuteAction(action);
+## Scope
 
-// Manual cleanup — leaks if any step above throws
-delete base;
-delete session_mgr;
-delete router;
-transport->disconnect();
-delete transport;
-```
+This package is a **thin, safe transport layer to the arm**. It deliberately does not contain robot math or control law.
 
-Every project repeats this. Errors are silently ignored. Resources leak on exceptions. Credentials are hardcoded. There is no thread safety, no input validation, and no way to test without hardware.
+**In this package**
 
-## The Solution
+- Connection lifecycle (transport → router → session → base client) with RAII teardown
+- Blocking and async joint / Cartesian motion
+- Multi-waypoint joint trajectory execution with a progress callback
+- Gripper position control and stall-based object detection
+- State reads: joint angles, end-effector pose, wrench
+- Emergency stop, joint-limit validation, workspace bounds, velocity clamping, command watchdog
+- A mock Kortex SDK (`mock/kortex_mock.hpp`) for hardware-free builds and CI
+
+**Not in this package**
+
+| Concern | Lives in |
+|---|---|
+| FK / IK / Jacobian / DH chain | `kinova_kinematics` |
+| Admittance control, force loops | `admittance_controller` |
+| External MAE F/T sensor driver | separate sensor package (this package never reads the MAE sensor) |
+| ROS 2 lifecycle node, action servers | downstream nodes that link this library |
+| 1 kHz low-level cyclic servoing | not implemented here — see [Performance](#performance-and-limits) |
+
+---
+
+## The problem this solves
+
+A single "connect and move" sequence in raw Kortex is roughly 60 lines of manual `new`/`delete`, protobuf assembly, and servoing-mode setup, with no error handling — and every resource leaks if any step in the middle throws.
 
 ```cpp
 KinovaInterface kinova;
-kinova.connect("192.168.1.10");
-kinova.moveToJointAngles({0, 0.26, 0, -1.05, 0, -0.78, 0});
-kinova.closeGripper(40.0);
+if (!kinova.connect("192.168.1.10")) return 1;
+
+kinova.moveToJointAngles({0, 0.26, 0, -1.05, 0, -0.78, 0});   // radians
+kinova.closeGripper();
 
 if (kinova.isObjectDetected()) {
-    // object grasped — proceed with lift
+    // gripper stalled before full closure → object in hand
 }
-// destructor auto-cleans everything, even on exceptions
+// destructor joins the watchdog thread and tears down the SDK objects
+// in reverse creation order, including on exception unwind
 ```
 
-Three lines replace sixty. Resources are managed automatically via RAII. Every call is thread-safe, input-validated, and covered by 25 automated tests.
+Every public call is input-validated, mutex-protected, and returns `false` (or an empty/default value) instead of throwing.
+
+---
 
 ## Architecture
 
 ```mermaid
 graph TD
-    A[User Code / ROS2<br/>Lifecycle nodes · Action servers · Pick-and-place] 
-    -->|single-line calls| B[KinovaInterface Wrapper]
-    
-    B --> B1[Connection<br/>connect · disconnect · isConnected]
-    B --> B2[Motion<br/>moveToJointAngles · moveToCartesianPose<br/>sync + async variants]
-    B --> B3[Trajectory<br/>executeTrajectory · async + feedback callback]
-    B --> B4[Gripper<br/>open · close · setPosition · isObjectDetected]
-    B --> B5[State<br/>getJointAngles · getCurrentPose · getWrench]
-    B --> B6[Safety<br/>emergencyStop · clearEStop · setSpeedLimit]
-    B --> B7[Velocity<br/>setCartesianVelocity · stopMotion · watchdog auto-stop]
+    A["Consumer code<br/>ROS 2 nodes · control loops · hardware tests"]
+      -->|single-line calls| B["KinovaInterface"]
 
-    B -->|protobuf over TCP/IP| C[Kortex SDK<br/>Transport → Router → Session → BaseClient]
-    C -->|TCP/IP| D[Kinova Gen3 7-DOF + Robotiq 2F-85<br/>192.168.1.10:10000]
+    B --> B1["Connection<br/>connect · disconnect · isConnected"]
+    B --> B2["Motion<br/>moveToJointAngles · moveToCartesianPose<br/>+ async variants"]
+    B --> B3["Trajectory<br/>executeTrajectory + feedback callback"]
+    B --> B4["Gripper<br/>open · close · setPosition · isObjectDetected"]
+    B --> B5["State<br/>getJointAngles · getCurrentPose · getWrench"]
+    B --> B6["Safety<br/>emergencyStop · clearEmergencyStop · setSpeedLimit"]
+    B --> B7["Velocity<br/>setCartesianVelocity · stopMotion · watchdog"]
+
+    B -->|"USE_KORTEX_MOCK=ON"| M["kortex_mock.hpp<br/>in-process stub, no network"]
+    B -->|"USE_KORTEX_MOCK=OFF"| C["Kortex SDK<br/>Transport → Router → Session → BaseClient<br/>+ BaseCyclicClient"]
+    C -->|TCP/IP| D["Kinova Gen3 7-DOF + Robotiq 2F-85"]
 ```
 
-## Key Design Decisions
+### Ownership and teardown
 
-```mermaid
-graph LR
-    subgraph Resources
-        R1[unique_ptr RAII] --- R2[Reverse destruction order]
-    end
+SDK objects are held in `std::unique_ptr` and created in dependency order: `TransportClientTcp` → `RouterClient` → `SessionManager` → `BaseClient` (→ `BaseCyclicClient`, hardware builds only). Teardown runs in exact reverse. If any creation step fails, `connect()` unwinds everything already built and returns `false`. The destructor stops and joins the watchdog thread **before** disconnecting.
 
-    subgraph Threads
-        T1[std::mutex on all Kortex calls] --- T2[std::atomic for e-stop flag]
-    end
+The class is non-copyable and non-movable: it owns a hardware connection, a mutex, and a thread.
 
-    subgraph Gripper
-        G1[SendGripperCommand is non-blocking] --- G2[Poll loop 100ms · 5s timeout]
-        G3[Object detection] --- G4[Commanded vs actual position gap]
-    end
+### Threading model
 
-    subgraph Testing
-        TE1[USE_KORTEX_MOCK compile switch] --- TE2[38 mock + 6 hardware test suites]
-    end
-```
+| Mechanism | Protects |
+|---|---|
+| `mutex_` | every Kortex SDK call and the joint-limit tables |
+| `velocity_time_mutex_` | `last_velocity_time_` timestamp shared with the watchdog thread |
+| `std::atomic<bool> connected_` | lock-free connection pre-check |
+| `std::atomic<bool> e_stop_active_` | lock-free e-stop gate, set *before* the SDK call |
+| `std::atomic<bool> velocity_active_` | lock-free velocity-mode flag read by the watchdog |
+| `std::atomic<bool> watchdog_running_` | thread exit signal |
 
-> **Units:** Radians in public API · Degrees internally (Kortex convention) · Conversion at API boundary
+Public methods acquire `mutex_`; private helpers (`disconnectLocked`, `validateJointAngles`, `validateTrajectory`) assume it is already held and never lock, which keeps the lock non-recursive.
 
-## Dependencies
+Long blocking waits release the lock first: `moveToJointAngles` and `moveToCartesianPose` unlock `mutex_` before waiting on the action-completion notification, and `executeTrajectory` unlocks before the waypoint loop, so state reads from other threads are not blocked during motion.
 
-- g++ with C++17 support
-- CMake 3.16+
-- Google Test (`sudo apt install libgtest-dev cmake`)
+### Units at the API boundary
 
-## Project Structure
+| Quantity | Public API | Sent to Kortex |
+|---|---|---|
+| Joint angles | **radians** | degrees (converted in-method) |
+| Pose position | **meters** | meters |
+| Pose orientation | **degrees** (`theta_x/y/z`, Kortex Euler convention) | degrees, passed through |
+| Linear velocity | **m/s** | m/s |
+| Angular velocity | **deg/s** | deg/s, passed through |
+| Gripper position | **normalized 0.0 = open → 1.0 = closed** | same |
+| Wrench | N and N·m | — |
 
-```
-wrapper/
-├── include/kinova_interface/
-│   ├── KinovaInterface.hpp
-│   └── Pose.hpp
-├── mock/
-│   └── kortex_mock.hpp
-├── src/
-│   └── KinovaInterface.cpp
-├── tests/
-│   ├── test_connection.cpp       # 4 tests (mock)
-│   ├── test_motion.cpp           # 7 tests (mock)
-│   ├── gripper_test.cpp          # 14 tests (mock)
-│   ├── TrajectoryTest.cpp        # 8 tests (mock)
-│   ├── test_velocity.cpp         # 5 tests (mock)
-│   └── hardware/
-│       ├── test_hw_connection.cpp # Real robot connect/disconnect
-│       ├── test_hw_motion.cpp     # Joint motion on real arm
-│       ├── test_hw_state.cpp      # State reading validation
-│       ├── test_hw_gripper.cpp    # Robotiq open/close/detect
-│       ├── test_hw_estop.cpp      # E-stop mid-motion
-│       └── test_hw_fk_ik.cpp      # FK/IK vs Kortex validation
-└── CMakeLists.txt
-```
+Angular velocity is the one deviation from the radians-at-the-boundary rule: `setCartesianVelocity` takes deg/s because Kortex `SendTwistCommand` expects deg/s, and the value is forwarded unconverted. Callers working in rad/s must convert at the call site.
+
+---
+
+## Requirements
+
+- C++17 compiler (GCC 11+ or Clang)
+- CMake ≥ 3.16
+- ROS 2 with `ament_cmake` (developed on Jazzy / Ubuntu 24.04)
+- `ament_cmake_gtest` (unit tests)
+- Kortex C++ SDK — **hardware builds only**
+- `kinova_kinematics` and Eigen 3 — **hardware builds only** (required by the FK/IK hardware test, not by the library itself)
+
+---
 
 ## Build
 
+The package is `ament_cmake`, so build it with colcon from the workspace root — not a bare `cmake ..`.
+
+### Mock build (no hardware, default)
+
 ```bash
-mkdir -p build && cd build
-cmake .. -DUSE_KORTEX_MOCK=ON
-make -j$(nproc)
+colcon build --packages-select kinova_wrapper
 ```
 
-## Run Tests
+`USE_KORTEX_MOCK` defaults to **ON**. The library compiles against `mock/kortex_mock.hpp`, links no SDK, and needs no network.
 
-### Mock Tests (no hardware required)
-./test_connection        # 4 tests
-./test_motion            # 7 tests
-./test_gripper           # 14 tests
-./test_trajectory        # 8 tests
-./test_velocity          # 5 tests
+### Hardware build
 
-### Hardware Tests (real Gen3 required)
-./hw_test_connection     # Connect/disconnect
-./hw_test_motion         # Small joint motions
-./hw_test_state          # Joint angle/pose reading
-./hw_test_gripper        # Robotiq 2F-85 open/close/object detection
-./hw_test_estop          # E-stop interrupts motion
-./hw_test_fk_ik          # FK/IK validated against Kortex API
+```bash
+colcon build --packages-select kinova_wrapper \
+  --cmake-args -DUSE_KORTEX_MOCK=OFF
+```
 
-**38 mock tests passing. 6 hardware test suites validated on real Gen3.**
+**Forgetting `-DUSE_KORTEX_MOCK=OFF` is the single most common failure mode:** the code compiles and runs cleanly against the mock and silently never touches the robot.
 
+CMake locates the SDK via `KORTEX_DIR`, resolved in this order:
 
+1. the `KORTEX_DIR` environment variable, if set
+2. otherwise `$HOME/kinova_learning/kortex/api_cpp/examples/kortex_api`
+3. override explicitly with `-DKORTEX_DIR=/path/to/kortex_api`
+
+The build fails fast with a `FATAL_ERROR` if `${KORTEX_DIR}/lib/release/libKortexApiCpp.a` is missing, rather than failing later at link time.
+
+### Hardware bring-up checklist
+
+1. Arm powered and reachable at `192.168.1.10`.
+2. Re-add the host route to the arm after every reboot — it does not persist. On the lab PC this is the netplan route to `192.168.1.10` via `enp6s0f3`; the interface name is machine-specific.
+3. Build with `-DUSE_KORTEX_MOCK=OFF`.
+4. Verify with a hardware test before running any control loop.
+
+---
 
 ## API
 
 ```cpp
+namespace kinova_wrapper {
 
-// Types
+struct Pose {
+    double x, y, z;                     // meters
+    double theta_x, theta_y, theta_z;   // degrees (Kortex Euler convention)
+};
+
 struct TrajectoryPoint {
-    std::vector<double> joint_angles;  // radians
-    double time_from_start;            // seconds
+    std::vector<double> joint_angles;   // radians, exactly 7
+    double time_from_start;             // seconds from trajectory start
 };
 
 using MotionCallback = std::function<void(
-    const std::vector<double>& current_joints, double progress)>;
-
-// Connection
-bool connect(const std::string& ip, uint32_t port = 10000);
-void disconnect();
-bool isConnected() const;
-
-// Motion (angles in radians)
-bool moveToJointAngles(const std::vector<double>& angles);
-std::future<bool> moveToJointAnglesAsync(const std::vector<double>& angles);
-bool moveToCartesianPose(const Pose& pose);
-std::future<bool> moveToCartesianPoseAsync(const Pose& pose);
-
-// Gripper (Robotiq 2F-85)
-bool openGripper(double speed = 0.1);
-bool closeGripper(double force = 40.0, double speed = 0.1);
-bool setGripperPosition(double position, double speed = 0.1);  // 0.0=open, 1.0=closed
-double getGripperPosition();                                     // returns -1.0 on failure
-bool isObjectDetected();                                         // stall-based detection
-
-// State
-std::vector<double> getJointAngles();
-Pose getCurrentPose();
-std::vector<double> getWrench();  // [Fx, Fy, Fz, Tx, Ty, Tz]
-
-// Safety
-void emergencyStop();
-bool isEStopActive() const;
-bool clearEmergencyStop();
-bool setSpeedLimit(double fraction);  // 0.0 to 1.0
-
-// Trajectory
-bool executeTrajectory(const std::vector<TrajectoryPoint>& waypoints,
-                       MotionCallback feedback_cb = nullptr);
-std::future<bool> executeTrajectoryAsync(const std::vector<TrajectoryPoint>& waypoints,
-                                          MotionCallback feedback_cb = nullptr);
-
-// Velocity Control
-bool setCartesianVelocity(double vx, double vy, double vz,    // m/s
-                          double wx, double wy, double wz);    // deg/s
-void stopMotion();                                              // zero velocity, arm stays powered
-bool isVelocityActive() const;                                  // true if in velocity mode
+    const std::vector<double>& current_joints,   // radians
+    double progress)>;                           // 0.0 → 1.0
+}
 ```
 
+### Connection
 
+| Method | Returns | Notes |
+|---|---|---|
+| `connect(ip, port = 10000, user = "admin", pass = "admin")` | `bool` | Idempotent — disconnects first if already connected. Hardware builds set 60 s session / 2 s connection inactivity timeouts explicitly. |
+| `disconnect()` | `void` | Safe to call repeatedly and when not connected. Never throws. |
+| `isConnected() const` | `bool` | Lock-free atomic read. |
 
-## ROS2 Integration
+### Motion
 
-The wrapper is consumed by `KinovaLifecycleController`, a ROS2 lifecycle node providing:
-- Joint state publishing at 10 Hz (`/joint_states`)
-- `MoveToPose` action server (`/kinova/move_to_pose`) with feedback and cancellation
-- Controlled startup/shutdown via lifecycle transitions (configure → activate → deactivate → cleanup)
-- Component-based architecture loaded into a shared container for efficient resource usage
+| Method | Returns | Rejects when |
+|---|---|---|
+| `moveToJointAngles(angles)` | `bool` | not connected · e-stop active · size ≠ 7 · outside joint limits · 30 s timeout · robot aborts the action |
+| `moveToJointAnglesAsync(angles)` | `std::future<bool>` | same — **store the future**; discarding it makes the destructor block immediately |
+| `moveToCartesianPose(pose)` | `bool` | not connected · e-stop active · 30 s timeout · robot aborts (unreachable pose) |
+| `moveToCartesianPoseAsync(pose)` | `std::future<bool>` | same |
 
-## Hardware
+Both async variants capture arguments **by value** into the `std::async` lambda, so a caller's vector going out of scope cannot dangle.
 
-| Component | Model | Interface |
-|-----------|-------|-----------|
-| Arm | Kinova Gen3 7-DOF | TCP/IP via Kortex SDK |
-| Gripper | Robotiq 2F-85 | Via Kortex `SendGripperCommand` (internal interconnect) |
-| Camera | Intel RealSense D435i | Wrist-mounted, ROS2 integration Week 5 |
-| OS | Ubuntu 24.04 | ROS2 Jazzy |
+### Trajectory
 
-## Roadmap
+| Method | Returns | Notes |
+|---|---|---|
+| `executeTrajectory(waypoints, cb = nullptr)` | `bool` | Waypoint-by-waypoint execution, **not** interpolated — the arm's internal controller smooths between points. Dwell between waypoints is the delta of consecutive `time_from_start`. |
+| `executeTrajectoryAsync(waypoints, cb = nullptr)` | `std::future<bool>` | Captures waypoints and callback by value. |
 
-- [x] Connection management (RAII, auto-cleanup, reconnection)
-- [x] Joint and Cartesian motion (sync + async)
-- [x] Emergency stop + joint limit validation
-- [x] Gripper control (position, open/close, object detection)
-- [x] Trajectory execution — multi-waypoint with progress callback
-- [x] ROS2 lifecycle node + action server + component architecture
-- [x] 38 Google Tests (connection, motion, gripper, trajectory, velocity)
-- [x] Hardware validated — 6 test suites on real Gen3
-- [x] FK/IK validated against Kortex API (error < 6mm)
-- [x] Cartesian velocity control — three-layer safety (clamping, workspace boundary, watchdog auto-stop)
-- [x] Admittance controller integration — 6-DOF force/torque compliant motion
-- [x] Surface wiping demo — PI force control maintaining 5N contact at 0.02 m/s
-- [ ] Perception pipeline — YOLOv8 + FoundationPose via built-in RealSense (Week 5-8)
-- [ ] RL sim-to-real — MuJoCo SAC training → ONNX deployment (Week 9-12)
-- [ ] Visual servoing capstone — programmatic + RL pick-and-place (Week 13-16)
-## Velocity Control
+Validation rejects: empty lists, negative first timestamp, non-monotonic or duplicate timestamps, and any waypoint failing joint-limit validation. The loop re-checks `e_stop_active_` before every waypoint, so an e-stop raised from another thread aborts mid-trajectory. The callback fires **after** each waypoint with the measured joint angles and a progress fraction.
 
-Cartesian velocity commands with three-layer safety:
-- **Clamping**: Linear velocities capped at ±0.5 m/s, angular at ±40 deg/s
-- **Workspace boundary**: Per-axis check prevents EE from leaving safe volume; motion away from boundary always allowed
-- **Watchdog**: Background thread auto-stops arm if no command received within 100ms (control loop crash protection)
+### Gripper (Robotiq 2F-85, via Kortex — no separate driver)
+
+| Method | Returns | Notes |
+|---|---|---|
+| `setGripperPosition(pos, speed = 0.1)` | `bool` | `pos` ∈ [0, 1]. Polls every 100 ms up to a 5 s timeout until within 0.01 of target. `speed` is currently ignored. |
+| `openGripper(speed = 0.1)` | `bool` | `setGripperPosition(0.0)` |
+| `closeGripper(force = 40.0, speed = 0.1)` | `bool` | `setGripperPosition(1.0)`; if the target is not reached, falls back to `isObjectDetected()` — so a stall on an object also returns `true`. `force` is currently ignored. |
+| `getGripperPosition()` | `double` | Normalized position, or `-1.0` on failure. |
+| `isObjectDetected()` | `bool` | Stall-based: true when the commanded position exceeded the measured position by more than 0.01 **and** the commanded position was > 0.5. |
+
+`SendGripperCommand` returns immediately on real hardware, which is why every gripper motion is confirmed by a polling loop rather than assumed complete.
+
+### State
+
+| Method | Returns | On failure |
+|---|---|---|
+| `getJointAngles()` | 7 doubles, radians | empty vector |
+| `getCurrentPose()` | `Pose` | default-constructed `Pose{}` |
+| `getWrench()` | 6 doubles `[Fx, Fy, Fz, Tx, Ty, Tz]` | empty vector |
+
+`getCurrentPose()` costs roughly 20 ms per call on hardware (gRPC round-trip) — **unverified beyond in-lab observation**; treat it as a rough figure and cache it in a background thread rather than calling it inside a control loop.
+
+`getWrench()` on hardware reads `BaseCyclicClient::RefreshFeedback()` and returns the arm's *estimated* external tool wrench. It is a model-based estimate from the arm, not a load-cell reading, and it is not the force source used for force control in this project — that is the external MAE sensor, handled outside this package.
+
+### Safety
+
+| Method | Returns | Notes |
+|---|---|---|
+| `emergencyStop()` | `void` | Sets the atomic flag **first**, then calls the SDK. If the SDK call throws, the flag stays set — fail stopped. Never throws. |
+| `isEStopActive() const` | `bool` | Lock-free. |
+| `clearEmergencyStop()` | `bool` | Calls `ClearFaults()`, then clears the flag only if that succeeded. |
+| `setSpeedLimit(fraction)` | `bool` | `fraction` ∈ [0, 1]. **Stores the value locally only** — the Kortex speed-limit call is not yet implemented. |
+
+### Cartesian velocity
 
 ```cpp
-// Move end-effector: +X at 0.1 m/s, slowly descending
-kinova.setCartesianVelocity(0.1, 0.0, -0.05, 0.0, 0.0, 0.0);
-std::this_thread::sleep_for(std::chrono::seconds(2));
-kinova.stopMotion();  // arm stops, stays powered — no e-stop clearing needed
+bool setCartesianVelocity(double vx, double vy, double vz,   // m/s, base frame
+                          double wx, double wy, double wz);  // deg/s, base frame
+void stopMotion();
+bool isVelocityActive() const;
 ```
 
-**Measured performance:** `SendTwistCommand()` blocks for ~73ms per call (gRPC
-round-trip to the arm's internal controller). This caps real-time velocity loops
-at ~13 Hz through the high-level API. Kinova documents 40 Hz max. Adequate for
-admittance control and surface wiping (1.5 mm per update at 20 mm/s). Upgrade
-path: Kortex low-level servoing API (1 kHz, joint-space commands).
+Three independent safety layers, applied in order:
 
-## Known Issues
+1. **Clamping** — every component is clamped to the limits below; any clamp logs a warning.
+2. **Workspace boundary** — the current EE position is read and any component pushing *further* past a bound is zeroed. Motion back toward the interior is always permitted.
+3. **Watchdog** — a background thread started on the first velocity command polls every 100 ms and calls `stopMotion()` if no new command arrived within `kWatchdogTimeoutMs`. This is the protection against a control-loop process dying mid-motion with a non-zero velocity latched.
 
-**High-level API loop rate (~13 Hz):** `SendTwistCommand()` takes ~73ms (gRPC
-round-trip). This is a Kortex SDK architectural limitation, not a bug. All
-math and state reads combined take <1ms — the API call is the sole bottleneck.
-Adequate for admittance control and surface wiping; visual servoing will require
-migration to low-level servoing (1 kHz, joint-space).
+`stopMotion()` calls `BaseClient::Stop()`. The arm stays powered and is immediately reusable — no fault clearing needed, unlike after an e-stop.
 
-**`bad_function_call` on activation (Kortex SDK):** A single message prints to stderr after connecting to the real Gen3. Originates from a closed-source SDK internal thread. No functional impact — joint data publishes, all transitions succeed. Cannot be patched.
+### Safety constants
+
+Defined in `KinovaInterface.hpp`; tune per cell before running on hardware.
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `kMaxLinearVelocity` | 0.2 m/s | per-axis linear clamp |
+| `kMaxAngularVelocity` | 40 deg/s | per-axis angular clamp |
+| `kWatchdogTimeoutMs` | 100 ms | auto-stop threshold |
+| `kWorkspaceXMin` / `Max` | 0.15 / 0.80 m | base-frame X bounds |
+| `kWorkspaceYMin` / `Max` | −0.13 / 0.50 m | base-frame Y bounds |
+| `kWorkspaceZMin` / `Max` | −0.01 / 1.00 m | base-frame Z bounds |
+| `kGripperTimeoutSec` | 5.0 s | gripper move timeout |
+| `kGripperPositionTolerance` | 0.01 | arrival tolerance and stall threshold |
+
+Joint limits are **hardcoded in the header**, not queried from firmware: joints 2 and 6 are constrained (±128.9° and ±120.3°), the rest are effectively unbounded. Validation converts each commanded radian value to degrees and compares against this table.
+
+---
+
+## Repository layout
+
+```
+kinova_wrapper/
+├── include/kinova_interface/
+│   ├── KinovaInterface.hpp        # public API, constants, joint limits
+│   └── Pose.hpp                   # Cartesian pose POD
+├── mock/
+│   └── kortex_mock.hpp            # in-process Kortex stand-in
+├── src/
+│   └── KinovaInterface.cpp        # implementation (~1.5k lines)
+├── tests/
+│   ├── test_connection.cpp
+│   ├── test_motion.cpp
+│   ├── gripper_test.cpp
+│   ├── TrajectoryTest.cpp
+│   ├── test_velocity.cpp
+│   ├── test_twist.cpp             # standalone manual smoke test (not a gtest)
+│   └── hardware/                  # real-robot tests, built only when mock is OFF
+├── CMakeLists.txt
+└── package.xml
+```
+
+---
+
+## Testing
+
+### Unit tests (mock SDK, no hardware)
+
+Registered via `ament_add_gtest` and built only when `BUILD_TESTING` and `USE_KORTEX_MOCK` are both ON.
+
+| Suite | Target | Tests | Covers |
+|---|---|---|---|
+| `test_connection.cpp` | `test_connection` | 4 | empty-IP rejection, successful connect, state after disconnect, disconnect-when-never-connected |
+| `test_motion.cpp` | `test_motion` | 7 | disconnected rejection, wrong vector size, valid motion, e-stop gating, joint-angle read size, read-when-disconnected, motion resumes after clearing e-stop |
+| `gripper_test.cpp` | `test_gripper` | 14 | valid/invalid/out-of-range positions, disconnected and e-stopped rejection, open/close, position read-back, object detected vs not (mock stall simulation), open-after-close |
+| `TrajectoryTest.cpp` | `test_trajectory` | 10 | valid trajectory, empty, wrong joint count, non-monotonic and duplicate timestamps, joint-limit violation, callback fire count, async, zero start time, e-stop rejection |
+| `test_velocity.cpp` | `test_velocity` | 5 | disconnected rejection, e-stop rejection, clamping, `stopMotion` zeroes the twist, watchdog auto-stop |
+
+**40 unit tests total.** Run them with:
+
+```bash
+colcon test --packages-select kinova_wrapper
+colcon test-result --verbose
+```
+
+Or run a binary directly from `build/kinova_wrapper/`.
+
+The mock exposes `getBaseClientForTesting()` — compiled in **only** under `USE_KORTEX_MOCK` — so tests can inspect the last twist command and toggle gripper stall simulation. It is not part of the hardware API surface.
+
+### Hardware tests
+
+`tests/hardware/` holds tests that require the real arm. They are excluded from CI and only configured when `USE_KORTEX_MOCK=OFF`. Currently `CMakeLists.txt` registers one target:
+
+| Target | Verifies |
+|---|---|
+| `test_hw_fk_ik` | `kinova_kinematics` FK/IK against Kortex's own reported pose on the real arm |
+
+Additional hardware test sources present in `tests/hardware/` are not yet registered as CMake targets and will not build until they are added.
+
+`tests/test_twist.cpp` is a **standalone `main()` program**, not a gtest and not built by CMake. It connects, prints the pose, streams a small +X twist for two seconds, and prints the resulting displacement. Compile it manually with the `g++` invocation in its header comment.
+
+---
+
+## Kortex SDK behaviours this wrapper works around
+
+Each of these was found during hardware bring-up and is handled inside the wrapper so callers never see it.
+
+| Behaviour | Handling |
+|---|---|
+| `ExecuteAction()` returns immediately; it does not block until motion completes | Subscribe to `OnNotificationActionTopic`, wait on a `std::promise` for `ACTION_END` / `ACTION_ABORT`, 30 s timeout, then unsubscribe |
+| `SendGripperCommand()` also returns immediately | 100 ms polling loop against measured gripper position, 5 s timeout |
+| Default session timeouts are very short — the session closes and actions abort after roughly 10 s of inactivity | `session_inactivity_timeout` 60 s and `connection_inactivity_timeout` 2 s set explicitly at session creation |
+| `ExecuteAction` requires an explicit servoing mode | `SINGLE_LEVEL_SERVOING` set before every action |
+| `SendTwistCommand()` expects deg/s | Documented at the API boundary; callers convert from rad/s |
+| `BaseClient` does not expose external wrench | `BaseCyclicClient::RefreshFeedback()` used instead, hardware builds only |
+
+---
+
+## Performance and limits
+
+**Measured, on hardware:** `SendTwistCommand()` blocks for roughly **73 ms** per call (gRPC round-trip to the arm's internal controller), which caps a velocity control loop at about **13 Hz** through this high-level API. All wrapper-side math and state handling combined is under 1 ms — the SDK call is the entire bottleneck.
+
+That is adequate for slow compliant motion such as surface following, and insufficient for anything needing tight force bandwidth. The path past it is the Kortex low-level cyclic servoing interface at 1 kHz in joint space, which is a different code path and **not** implemented in this package.
+
+---
+
+## Known issues
+
+**Open defects**
+
+- `validateTrajectory()` — the empty-list guard has lost its condition, so the function returns `false` unconditionally. Every call to `executeTrajectory()` is currently rejected during validation, and the trajectory tests that expect success will fail. Fix: restore `if (waypoints.empty())` around the first early return.
+- `setCartesianVelocity()` clamps to `kMaxLinearVelocity = 0.2` m/s, while `test_velocity.cpp` asserts a clamp to 0.5 m/s. One of the two is wrong; decide which limit is intended and align both. The trailing comment on the constant still reads `0.5m/s`.
+- `stopMotion()` does not clear `velocity_active_`, despite its documentation saying it does. Only the watchdog clears the flag, so `isVelocityActive()` keeps reporting `true` after an explicit stop until the watchdog fires.
+- **Lock-ordering hazard (found by inspection, not observed at runtime):** `setCartesianVelocity()` holds `mutex_` and then takes `velocity_time_mutex_`, while the watchdog thread holds `velocity_time_mutex_` and then calls `stopMotion()`, which takes `mutex_`. Opposite acquisition order between two threads is a deadlock pattern; the watchdog should release `velocity_time_mutex_` before calling `stopMotion()`.
+
+**By design / not yet implemented**
+
+- `setSpeedLimit()` stores the fraction locally; no Kortex call is made.
+- `closeGripper()`'s `force` argument and all gripper `speed` arguments are accepted and ignored.
+- `kMaxGripperForceN` is declared but unused.
+- Joint limits are hardcoded rather than read from firmware, so they will not follow a firmware or configuration change.
+- The mock models command/response shape, not timing or dynamics: it has no `BaseCyclicClient`, executes actions instantly, and reports zero pose and zero wrench. Mock tests validate wrapper *logic* — they cannot validate real motion.
+- **`bad_function_call` printed once to stderr on connecting to the real arm.** It originates in a closed-source SDK internal thread. No functional impact — state publishes and all calls succeed. Not patchable from here.
+
+---
+
+## Downstream consumers
+
+Other packages in the workspace that link this library: the admittance controller's velocity loop, the MoveIt bridge's `FollowJointTrajectory` action server, the ROS 2 lifecycle controller node, and the hardware test suites.
