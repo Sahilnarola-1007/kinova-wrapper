@@ -51,9 +51,9 @@ The wrapper sits between application code (ROS2 nodes, pick-and-place logic, RL 
 │  │  std::mutex ──── protects all Kortex calls                 │  │
 │  │  std::atomic ─── connected_, e_stop_active_ (lock-free)    │  │
 │  │  unique_ptr ──── owns transport, router, session, base     │  │
-│  │  validation ──── joint limits, gripper range, connection    │  │
+│  │  validation ──── joint limits, gripper range, connection   │  │
 │  │  conversion ──── radians↔degrees at API boundary           │  │
-│  │  watchdog ────── auto-stop velocity on control loop death   │  │
+│  │  watchdog ────── auto-stop velocity on control loop death  │  │
 │  └────────────────────────────────────────────────────────────┘  │
 │                                                                  │
 │  ┌────────────────────────────────────────────────────────────┐  │

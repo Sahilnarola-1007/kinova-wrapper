@@ -217,8 +217,8 @@ private:
     // Joints 1,3,5,7: No limts
     // Joints 2,4,6: actual firmware limits
     // =========================================================================
-    std::vector<double> joint_max_limits_{ 1e9, 128.9, 1e9, 1e9, 1e9, 120.3, 1e9};
-    std::vector<double> joint_min_limits_{-1e9,-128.9,-1e9,-1e9,-1e9,-120.3,-1e9};
+    std::vector<double> joint_max_limits_{ 1e9, 128.9, 1e9, 147.8, 1e9, 120.3, 1e9};
+    std::vector<double> joint_min_limits_{-1e9,-128.9,-1e9,-147.8,-1e9,-120.3,-1e9};
     // =========================================================================
     // Speed limit
     // =========================================================================
